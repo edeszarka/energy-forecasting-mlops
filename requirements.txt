@@ -1,0 +1,23 @@
+# Flat list mirroring [project.dependencies] + [dev]
+# This file is used for environments that don't support pyproject.toml
+# Pin all versions exactly.
+
+prophet==1.1.5
+lightgbm==4.3.0
+evidently==0.4.16
+mlflow==2.13.0
+requests==2.31.0
+holidays==0.46
+shap==0.45.0
+pandas==2.2.2
+numpy==1.26.4
+pyarrow==14.0.1
+
+# Dev dependencies
+pytest==8.2.1
+pytest-cov==5.0.0
+pytest-mock==3.14.0
+ruff==0.4.4
+mypy==1.10.0
+responses==0.25.0
+freezegun==1.4.0

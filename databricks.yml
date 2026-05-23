@@ -1,0 +1,119 @@
+bundle:
+  name: energy_forecasting_mlops
+
+variables:
+  databricks_host:
+    description: "Databricks workspace URL"
+  entso_e_api_key:
+    description: "ENTSO-E API key"
+    lookup:
+      secret_scope: "energy-forecasting"
+      secret_key: "entso_e_api_key"
+
+workspace:
+  host: ${var.databricks_host}
+
+resources:
+  jobs:
+    energy_hourly_pipeline:
+      name: "energy_hourly_pipeline"
+      schedule:
+        quartz_cron_expression: "0 5 * * * ?"
+        timezone_id: "UTC"
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: "ingest"
+          notebook_task:
+            notebook_path: "./notebooks/01_ingest.py"
+          job_cluster_key: "hourly_cluster"
+          timeout_seconds: 1800
+        - task_key: "transform"
+          depends_on:
+            - task_key: "ingest"
+          notebook_task:
+            notebook_path: "./notebooks/02_transform.py"
+          job_cluster_key: "hourly_cluster"
+          timeout_seconds: 1800
+        - task_key: "drift_check"
+          depends_on:
+            - task_key: "transform"
+          notebook_task:
+            notebook_path: "./notebooks/03_drift_check.py"
+          job_cluster_key: "hourly_cluster"
+          timeout_seconds: 900
+        - task_key: "predict"
+          depends_on:
+            - task_key: "drift_check"
+          notebook_task:
+            notebook_path: "./notebooks/04_predict.py"
+          job_cluster_key: "hourly_cluster"
+          timeout_seconds: 900
+
+    energy_retraining_pipeline:
+      name: "energy_retraining_pipeline"
+      schedule:
+        quartz_cron_expression: "0 0 2 ? * SUN"
+        timezone_id: "UTC"
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: "train_prophet"
+          notebook_task:
+            notebook_path: "./notebooks/05_train_prophet.py"
+          job_cluster_key: "retraining_cluster"
+          timeout_seconds: 3600
+        - task_key: "train_lgbm"
+          depends_on:
+            - task_key: "train_prophet"
+          notebook_task:
+            notebook_path: "./notebooks/06_train_lgbm.py"
+          job_cluster_key: "retraining_cluster"
+          timeout_seconds: 3600
+        - task_key: "evaluate"
+          depends_on:
+            - task_key: "train_lgbm"
+          notebook_task:
+            notebook_path: "./notebooks/07_evaluate.py"
+          job_cluster_key: "retraining_cluster"
+          timeout_seconds: 1800
+        - task_key: "promote_model"
+          depends_on:
+            - task_key: "evaluate"
+          notebook_task:
+            notebook_path: "./notebooks/08_promote_model.py"
+          job_cluster_key: "retraining_cluster"
+          timeout_seconds: 900
+
+  job_clusters:
+    hourly_cluster:
+      new_cluster:
+        spark_version: "14.3.x-scala2.12"
+        node_type_id: "Standard_DS3_v2" # AWS: m5.large
+        num_workers: 1
+        spark_conf:
+          spark.databricks.delta.preview.enabled: "true"
+        custom_tags:
+          ResourceClass: "SingleNode"
+    retraining_cluster:
+      new_cluster:
+        spark_version: "14.3.x-scala2.12"
+        node_type_id: "Standard_DS3_v2"
+        num_workers: 2
+        spark_conf:
+          spark.databricks.delta.preview.enabled: "true"
+
+targets:
+  dev:
+    workspace:
+      root_path: /Users/${current_user.userName}/.bundle/${bundle.name}/dev
+    resources:
+      jobs:
+        energy_hourly_pipeline:
+          schedule:
+            pause_status: "PAUSED"
+        energy_retraining_pipeline:
+          schedule:
+            pause_status: "PAUSED"
+  prod:
+    workspace:
+      root_path: /Users/${current_user.userName}/.bundle/${bundle.name}/prod
+    mode: production
