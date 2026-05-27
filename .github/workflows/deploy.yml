@@ -20,7 +20,8 @@ jobs:
           python-version: "3.11"
 
       - name: Install Databricks CLI
-        uses: databricks/setup-cli@v0.2.0
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-databricks-cli/main/install.sh | sh
 
       - name: Validate Bundle
         env:
