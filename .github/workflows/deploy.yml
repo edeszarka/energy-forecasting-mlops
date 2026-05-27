@@ -8,6 +8,8 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     # Only run if CI passed (if triggered by push to main)
     # Note: For simple setups, usually CI runs on the same commit.
     steps:
