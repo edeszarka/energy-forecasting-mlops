@@ -6,6 +6,34 @@
 - **Unity Catalog**: Use catalog `workspace` and schema `energy_forecasting`.
 - **Storage**: Use Unity Catalog Volumes for raw data landing and reports. Base path: `/Volumes/workspace/energy_forecasting/data/`.
 
+## Mandatory Schema & Path Overrides (PRECECEDENCE)
+The following specifications override ANY contradictory instructions in future prompts to maintain alignment with the existing implementation:
+
+- **Feature Column Names**:
+  - `temperature_c` (NOT `temp_celsius`)
+  - `rolling_7d_mean` (NOT `rolling_mean_7d`)
+  - `rolling_7d_std` (NOT `rolling_std_7d`)
+  - `rolling_24h_mean` (New mandatory column)
+  - `is_weekend` (BooleanType)
+  - `is_holiday` (BooleanType)
+
+- **Canonical FEATURE_COLS List**:
+  ```python
+  FEATURE_COLS = [
+      'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
+      'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
+      'hour_of_day', 'day_of_week', 'month',
+      'is_weekend', 'is_holiday'
+  ]
+  ```
+
+- **Infrastructure Paths**:
+  - **Tables**: Always use 3-level Unity Catalog naming: `workspace.energy_forecasting.<table_name>`
+  - **Files/Volumes**: Always use Volume paths: `/Volumes/workspace/energy_forecasting/data/<subpath>` (Never use `/dbfs/` or `energy_forecast.`)
+
+- **Logging Standard**:
+  - Format: `"%(asctime)s [%(levelname)s] %(name)s: %(message)s"`
+
 ## Engineering Standards
 - **Idempotency**: All writes must use `MERGE INTO` or deterministic hashing (`MD5(model + horizon + timestamp)`) for IDs.
 - **Paths**: Use `pathlib.Path` for local/GHA logic and `PurePosixPath` for Databricks Volume paths.

@@ -72,7 +72,6 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
         model.fit(train_df)
         
         # Evaluate on test set
-        # For evaluation, we use the actual temperature in the test set
         forecast = model.predict(test_df[['ds', 'temperature_c']])
         
         # Metrics
@@ -91,17 +90,16 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
             "n_train": len(train_df),
             "n_test": len(test_df)
         })
+        mlflow.log_metrics({"mae": mae, "rmse": rmse, "mape": mape})
         
-        mlflow.log_metrics({
-            "mae": mae,
-            "rmse": rmse,
-            "mape": mape
-        })
-        
-        # Log model
+        # Reference Window Metadata
+        training_data_end = train_df['ds'].max()
+        training_data_start = train_df['ds'].min()
+        mlflow.set_tag("training_data_end", training_data_end.isoformat())
+        mlflow.set_tag("training_data_start", training_data_start.isoformat())
+
+        # Log and Register model
         mlflow.prophet.log_model(model, artifact_path="model")
-        
-        # Register model
         mlflow.register_model(
             model_uri=f"runs:/{run.info.run_id}/model",
             name=model_name,
@@ -110,30 +108,17 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
         
         return {
             "model_name": model_name,
-            "mae": mae,
-            "rmse": rmse,
-            "mape": mape,
-            "n_train": len(train_df),
-            "n_test": len(test_df)
+            "mae": mae, "rmse": rmse, "mape": mape,
+            "n_train": len(train_df), "n_test": len(test_df)
         }
 
 # COMMAND ----------
 
 # Main execution
 spark.sql("USE CATALOG workspace")
-
-# Load data
-logger.info("Loading silver features...")
 pdf = spark.read.table(CONFIG["silver_table"]).filter(F.col("value_mwh").isNotNull()).toPandas()
-
-# Prep for Prophet
-# Rename columns: timestamp -> ds, value_mwh -> y
 pdf = pdf.rename(columns={"timestamp": "ds", "value_mwh": "y"})
-pdf['ds'] = pd.to_datetime(pdf['ds']).dt.tz_localize(None) # Prophet prefers naive local or UTC
-
-# Check convergence/future temperature notes
-# Naive forecast for future temperature: in a real production 04_predict notebook, 
-# we would join future weather. Here we evaluate on test sets with known weather.
+pdf['ds'] = pd.to_datetime(pdf['ds']).dt.tz_localize(None)
 
 results = []
 parent_run_name = f"prophet_training_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}"
@@ -143,9 +128,8 @@ with mlflow.start_run(run_name=parent_run_name):
     res_168 = train_prophet_model(pdf, 168, "energy_prophet_168h")
     results.extend([res_24, res_168])
 
-# Print summary table
-summary_df = pd.DataFrame(results)
 print("\nProphet Training Summary:")
-print(summary_df.to_string(index=False))
-
+print(pd.DataFrame(results).to_string(index=False))
 dbutils.notebook.exit("SUCCESS")
+
+# FIX APPLIED: Added training_data_start and training_data_end MLflow tags for drift reference window definition.

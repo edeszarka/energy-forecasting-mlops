@@ -458,7 +458,7 @@ print(f"""
 │ Data drift detected:       {data_drift['dataset_drift']}
 │ Drifted features (N):      {data_drift['n_drifted_features']} ({result_row['drifted_features']})
 │ value_mwh drift score:     {data_drift['drift_score_value_mwh']:.4f}
-│ temp_celsius drift score:  {data_drift['drift_score_temp']:.4f}
+│ temperature_c drift score:  {data_drift['drift_score_temp']:.4f}
 │ Prediction drift:          {pred_drift['prediction_drift_detected']}
 │ MAE current window:        {result_row['prediction_mae_current'] if result_row['prediction_mae_current'] else 'N/A'} MWh
 │ MAE reference window:      {result_row['prediction_mae_reference'] if result_row['prediction_mae_reference'] else 'N/A'} MWh

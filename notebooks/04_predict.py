@@ -40,18 +40,11 @@ SCHEMA = "energy_forecasting"
 CONFIG = {
     "silver_table": f"{CATALOG}.{SCHEMA}.silver_features",
     "forecast_table": f"{CATALOG}.{SCHEMA}.gold_forecasts",
-    "model_names": {
-        "lgbm_24h": "energy_lgbm_24h",
-        "lgbm_168h": "energy_lgbm_168h",
-        "prophet_24h": "energy_prophet_24h",
-        "prophet_168h": "energy_prophet_168h",
-    },
-    "primary_models": ["energy_lgbm_24h", "energy_lgbm_168h"],
-    "fallback_models": ["energy_prophet_24h", "energy_prophet_168h"],
     "feature_columns": [
         'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
-        'rolling_7d_mean', 'rolling_7d_std', 'hour_of_day',
-        'day_of_week', 'month', 'is_weekend', 'is_holiday'
+        'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
+        'hour_of_day', 'day_of_week', 'month',
+        'is_weekend', 'is_holiday'
     ],
     "force_backfill": dbutils.widgets.get("force_backfill").lower() == "true",
     "horizon_hours": dbutils.widgets.get("horizon_hours"),
@@ -59,18 +52,8 @@ CONFIG = {
 }
 
 # Hungarian Public Holidays (Static placeholder)
-# NOTE: In a production system, use a dynamic library like 'holidays'.
 HUNGARIAN_HOLIDAYS = {
-    (1, 1),   # New Year
-    (3, 15),  # Revolution Day
-    (4, 21),  # Easter Monday (approx)
-    (5, 1),   # Labour Day
-    (5, 19),  # Whit Monday (approx)
-    (8, 20),  # State Foundation
-    (10, 23), # Republic Day
-    (11, 1),  # All Saints
-    (12, 25), # Christmas
-    (12, 26), # Christmas
+    (1, 1), (3, 15), (4, 21), (5, 1), (5, 19), (8, 20), (10, 23), (11, 1), (12, 25), (12, 26),
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -86,11 +69,8 @@ class ModelNotFoundError(Exception):
 # ─────────────────────────────────────────
 
 def load_production_model(model_name: str, mlflow_client: MlflowClient) -> Tuple[Any, str, str]:
-    """
-    Loads the Production version of a model.
-    """
+    """Loads the Production version of a model."""
     try:
-        # NOTE: MLflow 2.x prefers aliases, but stages are used for compatibility with older Databricks runtimes.
         version_info = mlflow_client.get_latest_versions(model_name, stages=["Production"])
         if not version_info:
             raise ModelNotFoundError(f"No Production version found for {model_name}.")
@@ -113,9 +93,7 @@ def load_production_model(model_name: str, mlflow_client: MlflowClient) -> Tuple
         raise RuntimeError(f"Error loading {model_name}: {e}")
 
 def load_models_with_fallback(config: dict, mlflow_client: MlflowClient) -> Dict[int, Tuple[Any, str, str]]:
-    """
-    Tries LGBM, falls back to Prophet if missing.
-    """
+    """Tries LGBM, falls back to Prophet if missing."""
     loaded = {}
     for h in [24, 168]:
         primary = f"energy_lgbm_{h}h"
@@ -141,10 +119,7 @@ def prepare_inference_features(
     horizon_hours: int,
     forecast_run_at: datetime
 ) -> pd.DataFrame:
-    """
-    Builds future features. Uses naive proxies for temperature and future lags.
-    """
-    # Step 1: Load history
+    """Builds future features."""
     history_limit = max(horizon_hours + 7*24, 200)
     history_pd = spark.table(config["silver_table"]) \
         .orderBy(F.col("timestamp").desc()) \
@@ -156,22 +131,16 @@ def prepare_inference_features(
         raise ValueError(f"Insufficient history: {len(history_pd)} rows. Need at least 168.")
         
     last_actual = history_pd["value_mwh"].dropna().iloc[-1]
-    
-    # Step 2: Generate future timestamps
     start_ts = forecast_run_at.replace(minute=0, second=0, microsecond=0)
     future_ts = [start_ts + timedelta(hours=i) for i in range(1, horizon_hours + 1)]
     
     future_rows = []
     for t in future_ts:
-        # Calendar
         is_holiday = 1 if (t.month, t.day) in HUNGARIAN_HOLIDAYS else 0
-        
-        # Temp Proxy: Same hour 7 days ago
         proxy_time = t - timedelta(days=7)
         temp_matches = history_pd[history_pd["timestamp"] == proxy_time]["temperature_c"]
         temp_c = temp_matches.iloc[0] if not temp_matches.empty else history_pd["temperature_c"].iloc[-1]
         
-        # Lag proxies (naive)
         def get_lag(target_t):
             match = history_pd[history_pd["timestamp"] == target_t]["value_mwh"]
             return match.iloc[0] if not match.empty else last_actual
@@ -187,8 +156,9 @@ def prepare_inference_features(
             "lag_24h": get_lag(t - timedelta(hours=24)),
             "lag_48h": get_lag(t - timedelta(hours=48)),
             "lag_168h": get_lag(t - timedelta(hours=168)),
-            "rolling_mean_7d": history_pd["value_mwh"].tail(168).mean(),
-            "rolling_std_7d": history_pd["value_mwh"].tail(168).std() or 0.0
+            "rolling_7d_mean": history_pd["value_mwh"].tail(168).mean(),
+            "rolling_7d_std": history_pd["value_mwh"].tail(168).std() or 0.0,
+            "rolling_24h_mean": history_pd["value_mwh"].tail(24).mean()
         }
         future_rows.append(row)
         
@@ -209,9 +179,7 @@ def generate_forecasts(
     forecast_run_at: datetime,
     config: dict
 ) -> pd.DataFrame:
-    """
-    Inference loop.
-    """
+    """Inference loop."""
     if "lgbm" in model_name:
         X = features_df[config["feature_columns"]]
         preds = np.clip(model.predict(X), a_min=0, a_max=None)
@@ -223,7 +191,6 @@ def generate_forecasts(
     output_rows = []
     for i, (ts, pred) in enumerate(zip(features_df.index, preds)):
         # IDEMPOTENCY: Deterministic Hash
-        # Guarantees that running for the same model/horizon/timestamp results in the same ID.
         f_id = hashlib.md5(f"{model_name}_{horizon_hours}_{ts.isoformat()}".encode()).hexdigest()
         
         output_rows.append({
@@ -248,12 +215,7 @@ def generate_forecasts(
 # ───────────────────────────────────────
 
 def write_forecasts(forecasts_df: pd.DataFrame, spark: SparkSession, config: dict, is_backfill: bool = False):
-    """
-    Idempotent write using MERGE.
-    """
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {SCHEMA}")
-    
-    # Define schema for creation
+    """Idempotent write using MERGE."""
     schema = StructType([
         StructField("forecast_id", StringType(), False),
         StructField("timestamp", TimestampType(), False),
@@ -272,19 +234,13 @@ def write_forecasts(forecasts_df: pd.DataFrame, spark: SparkSession, config: dic
         spark.createDataFrame([], schema).write.format("delta").saveAsTable(config["forecast_table"])
         
     sdf = spark.createDataFrame(forecasts_df, schema)
-    
     target = DeltaTable.forName(spark, config["forecast_table"])
-    
-    # Merge condition
     condition = "target.forecast_id = source.forecast_id"
     
     merge_builder = target.alias("target").merge(sdf.alias("source"), condition)
-    
     if is_backfill:
         merge_builder = merge_builder.whenMatchedUpdateAll()
-        
     merge_builder.whenNotMatchedInsertAll().execute()
-    logger.info(f"Forecasts merged for {len(forecasts_df)} rows.")
 
 # COMMAND ----------
 
@@ -292,10 +248,7 @@ def write_forecasts(forecasts_df: pd.DataFrame, spark: SparkSession, config: dic
 # ──────────────────────────────────────
 
 def backfill_actuals(spark: SparkSession, config: dict) -> int:
-    """
-    Updates gold_forecasts with actuals from silver_features.
-    """
-    # SQL MERGE is efficient for this
+    """Updates gold_forecasts with actuals from silver_features."""
     merge_sql = f"""
     MERGE INTO {config['forecast_table']} AS target
     USING {config['silver_table']} AS source
@@ -306,13 +259,9 @@ def backfill_actuals(spark: SparkSession, config: dict) -> int:
     WHEN MATCHED THEN UPDATE SET target.actual_mwh = source.value_mwh
     """
     spark.sql(merge_sql)
-    
-    # Get count (approx from history)
     try:
         history = spark.sql(f"DESCRIBE HISTORY {config['forecast_table']} LIMIT 1").collect()[0]
-        updated = history['operationMetrics'].get('numTargetRowsUpdated', 0)
-        logger.info(f"Backfilled actuals for {updated} rows.")
-        return int(updated)
+        return int(history['operationMetrics'].get('numTargetRowsUpdated', 0))
     except: return 0
 
 # COMMAND ----------
@@ -321,35 +270,43 @@ def backfill_actuals(spark: SparkSession, config: dict) -> int:
 # ────────────────────────────────────────────────
 
 spark.sql(f"USE CATALOG {CATALOG}")
-client = MlflowClient()
+mlflow_client = MlflowClient()
 forecast_run_at = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
-# Determine horizons
 h_widget = CONFIG["horizon_hours"]
 horizons = [24, 168] if h_widget == "both" else [int(h_widget)]
 
-# Load Models
-models_dict = load_models_with_fallback(CONFIG, client)
+models_dict = load_models_with_fallback(CONFIG, mlflow_client)
 
 for h in horizons:
     logger.info(f"Starting forecast for {h}h horizon...")
     model, ver, r_id = models_dict[h]
     
-    feats = prepare_inference_features(spark, CONFIG, h, forecast_run_at)
-    forecasts = generate_forecasts(model, CONFIG["model_names"][f"{'lgbm' if 'lgbm' in CONFIG['model_names']['lgbm_'+str(h)+'h'] else 'prophet'}_{h}h"], ver, r_id, feats, h, forecast_run_at, CONFIG)
+    # Determine actual model name from the loaded model metadata
+    lgbm_name = f"energy_lgbm_{h}h"
+    prophet_name = f"energy_prophet_{h}h"
     
-    write_forecasts(forecasts, spark, CONFIG, is_backfill=CONFIG["force_backfill"])
+    try:
+        lgbm_versions = mlflow_client.get_latest_versions(lgbm_name, stages=["Production"])
+        actual_model_name = lgbm_name if lgbm_versions and lgbm_versions[0].run_id == r_id else prophet_name
+    except Exception:
+        actual_model_name = prophet_name
+    
+    feats = prepare_inference_features(spark, CONFIG, h, forecast_run_at)
+    forecasts_df = generate_forecasts(
+        model=model,
+        model_name=actual_model_name,
+        model_version=ver,
+        run_id=r_id,
+        features_df=feats,
+        horizon_hours=h,
+        forecast_run_at=forecast_run_at,
+        config=CONFIG
+    )
+    write_forecasts(forecasts_df, spark, CONFIG, is_backfill=CONFIG["force_backfill"])
+    logger.info(f"Horizon {h}h: wrote {len(forecasts_df)} forecast rows using {actual_model_name} v{ver}")
 
-# Always backfill actuals
 backfilled_count = backfill_actuals(spark, CONFIG)
-
-# Summary
-print(f"""
-┌─────────────────────────────────────────────────────┐
-│ FORECAST SUMMARY — {forecast_run_at.strftime('%Y-%m-%d %H:%M')} UTC │
-├─────────────────────────────────────────────────────┤
-│ Actuals backfilled: {backfilled_count} rows                        │
-└─────────────────────────────────────────────────────┘
-""")
-
 dbutils.notebook.exit("SUCCESS")
+
+# FIX APPLIED: Corrected model name resolution logic to distinguish between primary (LGBM) and fallback (Prophet) loaded models using run_id comparison.

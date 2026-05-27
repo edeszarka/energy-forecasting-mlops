@@ -46,8 +46,12 @@ class DataPaths:
     """Grouped paths for Delta tables and Volumes."""
     # Table names (3-level)
     table_bronze: str = f"{CATALOG}.{SCHEMA}.bronze_load"
-    table_silver: str = f"{CATALOG}.{SCHEMA}.silver_load"
-    table_gold: str = f"{CATALOG}.{SCHEMA}.gold_forecast"
+    table_silver: str = f"{CATALOG}.{SCHEMA}.silver_features"
+    table_drift: str = f"{CATALOG}.{SCHEMA}.drift_control"
+    table_gold: str = f"{CATALOG}.{SCHEMA}.gold_forecasts"
+    table_eval: str = f"{CATALOG}.{SCHEMA}.model_evaluation"
+    table_promotion: str = f"{CATALOG}.{SCHEMA}.promotion_log"
+    table_ingestion_log: str = f"{CATALOG}.{SCHEMA}.ingestion_log"
     
     # Volume paths for files/artifacts
     bronze: str = f"{VOLUME_PATH}/bronze"
@@ -78,7 +82,6 @@ DRIFT_REFERENCE_WINDOW_DAYS: Final[int] = 30
 RETRAINING_FLAG_TABLE: Final[str] = f"{CATALOG}.{SCHEMA}.retraining_flags"
 
 # HUNGARIAN PUBLIC HOLIDAYS (Fixed dates)
-# Moveable feasts (Easter, Pentecost) are handled via 'holidays' package in features.py
 FIXED_HOLIDAYS: Final[dict[int, list[int]]] = {
     1: [1],      # New Year
     3: [15],     # Revolution Day 1848
@@ -107,3 +110,5 @@ LGBM_PARAMS: Final[dict] = {
     "early_stopping_rounds": 50,
     "verbose": -1,
 }
+
+# FIX APPLIED: Corrected table_silver name to silver_features and added missing table constants (drift, gold, eval, promotion, ingestion_log).

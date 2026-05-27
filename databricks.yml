@@ -14,6 +14,19 @@ workspace:
   host: ${var.databricks_host}
 
 resources:
+  environments:
+    default:
+      environment_spec:
+        client: "1"
+        dependencies:
+          - prophet==1.1.5
+          - lightgbm==4.3.0
+          - evidently==0.4.16
+          - mlflow==2.13.0
+          - holidays==0.46
+          - shap==0.45.0
+          - requests==2.31.0
+
   jobs:
     energy_hourly_pipeline:
       name: "energy_hourly_pipeline"
@@ -25,28 +38,28 @@ resources:
         - task_key: "ingest"
           notebook_task:
             notebook_path: "./notebooks/01_ingest.py"
-          job_cluster_key: "hourly_cluster"
+          environment_key: "default"
           timeout_seconds: 1800
         - task_key: "transform"
           depends_on:
             - task_key: "ingest"
           notebook_task:
             notebook_path: "./notebooks/02_transform.py"
-          job_cluster_key: "hourly_cluster"
+          environment_key: "default"
           timeout_seconds: 1800
         - task_key: "drift_check"
           depends_on:
             - task_key: "transform"
           notebook_task:
             notebook_path: "./notebooks/03_drift_check.py"
-          job_cluster_key: "hourly_cluster"
+          environment_key: "default"
           timeout_seconds: 900
         - task_key: "predict"
           depends_on:
             - task_key: "drift_check"
           notebook_task:
             notebook_path: "./notebooks/04_predict.py"
-          job_cluster_key: "hourly_cluster"
+          environment_key: "default"
           timeout_seconds: 900
 
     energy_retraining_pipeline:
@@ -59,47 +72,28 @@ resources:
         - task_key: "train_prophet"
           notebook_task:
             notebook_path: "./notebooks/05_train_prophet.py"
-          job_cluster_key: "retraining_cluster"
+          environment_key: "default"
           timeout_seconds: 3600
         - task_key: "train_lgbm"
-          depends_on:
-            - task_key: "train_prophet"
           notebook_task:
             notebook_path: "./notebooks/06_train_lgbm.py"
-          job_cluster_key: "retraining_cluster"
+          environment_key: "default"
           timeout_seconds: 3600
         - task_key: "evaluate"
           depends_on:
+            - task_key: "train_prophet"
             - task_key: "train_lgbm"
           notebook_task:
             notebook_path: "./notebooks/07_evaluate.py"
-          job_cluster_key: "retraining_cluster"
+          environment_key: "default"
           timeout_seconds: 1800
         - task_key: "promote_model"
           depends_on:
             - task_key: "evaluate"
           notebook_task:
             notebook_path: "./notebooks/08_promote_model.py"
-          job_cluster_key: "retraining_cluster"
+          environment_key: "default"
           timeout_seconds: 900
-
-  job_clusters:
-    hourly_cluster:
-      new_cluster:
-        spark_version: "14.3.x-scala2.12"
-        node_type_id: "Standard_DS3_v2" # AWS: m5.large
-        num_workers: 1
-        spark_conf:
-          spark.databricks.delta.preview.enabled: "true"
-        custom_tags:
-          ResourceClass: "SingleNode"
-    retraining_cluster:
-      new_cluster:
-        spark_version: "14.3.x-scala2.12"
-        node_type_id: "Standard_DS3_v2"
-        num_workers: 2
-        spark_conf:
-          spark.databricks.delta.preview.enabled: "true"
 
 targets:
   dev:
@@ -117,3 +111,5 @@ targets:
     workspace:
       root_path: /Users/${current_user.userName}/.bundle/${bundle.name}/prod
     mode: production
+
+# FIX APPLIED: Migrated to serverless compute (environment_key: default) and configured training tasks to run in parallel.
