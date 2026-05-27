@@ -108,7 +108,21 @@ try:
     load_error = ""
     try:
         client = EntsoEClient()
-        load_df = client.fetch_actual_load(fetch_start, fetch_end)
+        # Chunking for large lookbacks
+        chunks = []
+        curr_start = fetch_start
+        while curr_start < fetch_end:
+            curr_end = min(curr_start + timedelta(days=7), fetch_end)
+            print(f"Fetching load chunk: {curr_start} to {curr_end}")
+            chunk_df = client.fetch_actual_load(curr_start, curr_end)
+            if not chunk_df.empty:
+                chunks.append(chunk_df)
+            curr_start = curr_end
+        
+        if chunks:
+            load_df = pd.concat(chunks).drop_duplicates(subset=["timestamp"], keep="last")
+        else:
+            load_status = "empty"
     except Exception as e:
         print(f"ENTSO-E fetch failed: {e}")
         load_status = "fetch_failed"
@@ -218,7 +232,7 @@ EOF
             exit 0
           fi
           
-          RUN_RESPONSE=$(databricks jobs run-now --job-id "$JOB_ID" --job-parameters "{\"run_date\": \"$RUN_DATE\", \"dry_run\": \"false\"}")
+          RUN_RESPONSE=$(databricks jobs run-now --job-id "$JOB_ID" --job-parameters "{\"run_date\": \"$RUN_DATE\", \"dry_run\": \"false\", \"lookback_files\": \"$LOOKBACK_HOURS\"}")
           RUN_ID=$(echo "$RUN_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['run_id'])")
           
           echo "Triggered job run: $RUN_ID"
