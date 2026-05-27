@@ -20,7 +20,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Databricks CLI
-        uses: databricks/setup-databricks-cli@v0.1.0
+        uses: databricks/setup-cli@v0.2.0
 
       - name: Validate Bundle
         env:
