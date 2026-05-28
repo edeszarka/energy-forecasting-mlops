@@ -227,3 +227,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# MD files
+energy_forecast_project_summary.md
+GEMINI.md
