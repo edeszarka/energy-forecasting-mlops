@@ -76,107 +76,107 @@ jobs:
           PYTHONPATH: "."
         run: |
           python3 - <<'EOF'
-import os
-import sys
-import json
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-import pandas as pd
-from src.api_client import EntsoEClient, OpenMeteoClient
-from src.config import ENTSO_E_MAX_RANGE_DAYS
+          import os
+          import sys
+          import json
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+          import pandas as pd
+          from src.api_client import EntsoEClient, OpenMeteoClient
+          from src.config import ENTSO_E_MAX_RANGE_DAYS
 
-try:
-    run_dt = datetime.fromisoformat(os.environ["RUN_DATE"]).replace(tzinfo=timezone.utc)
-    lookback = int(os.environ["LOOKBACK_HOURS"])
-    fetch_start = run_dt - timedelta(hours=lookback)
-    fetch_end = run_dt
+          try:
+              run_dt = datetime.fromisoformat(os.environ["RUN_DATE"]).replace(tzinfo=timezone.utc)
+              lookback = int(os.environ["LOOKBACK_HOURS"])
+              fetch_start = run_dt - timedelta(hours=lookback)
+              fetch_end = run_dt
 
-    Path("/tmp/load").mkdir(parents=True, exist_ok=True)
-    Path("/tmp/temperature").mkdir(parents=True, exist_ok=True)
+              Path("/tmp/load").mkdir(parents=True, exist_ok=True)
+              Path("/tmp/temperature").mkdir(parents=True, exist_ok=True)
 
-    print(f"Fetching window: {fetch_start} to {fetch_end}")
+              print(f"Fetching window: {fetch_start} to {fetch_end}")
 
-    # 1. Fetch Load Data
-    load_df = pd.DataFrame()
-    load_status = "ok"
-    load_error = ""
-    try:
-        client = EntsoEClient()
-        chunks = []
-        curr_start = fetch_start
-        while curr_start < fetch_end:
-            curr_end = min(curr_start + timedelta(days=7), fetch_end)
-            print(f"Fetching load chunk: {curr_start} to {curr_end}")
-            chunk_df = client.fetch_actual_load(curr_start, curr_end)
-            if not chunk_df.empty:
-                chunks.append(chunk_df)
-            curr_start = curr_end
-        
-        if chunks:
-            load_df = pd.concat(chunks).drop_duplicates(subset=["timestamp"], keep="last")
-        else:
-            load_status = "empty"
-    except Exception as e:
-        print(f"ENTSO-E fetch failed: {e}")
-        load_status = "fetch_failed"
-        load_error = str(e)
+              # 1. Fetch Load Data
+              load_df = pd.DataFrame()
+              load_status = "ok"
+              load_error = ""
+              try:
+                  client = EntsoEClient()
+                  chunks = []
+                  curr_start = fetch_start
+                  while curr_start < fetch_end:
+                      curr_end = min(curr_start + timedelta(days=7), fetch_end)
+                      print(f"Fetching load chunk: {curr_start} to {curr_end}")
+                      chunk_df = client.fetch_actual_load(curr_start, curr_end)
+                      if not chunk_df.empty:
+                          chunks.append(chunk_df)
+                      curr_start = curr_end
+                  
+                  if chunks:
+                      load_df = pd.concat(chunks).drop_duplicates(subset=["timestamp"], keep="last")
+                  else:
+                      load_status = "empty"
+              except Exception as e:
+                  print(f"ENTSO-E fetch failed: {e}")
+                  load_status = "fetch_failed"
+                  load_error = str(e)
 
-    # 2. Fetch Temperature Data
-    temp_df = pd.DataFrame()
-    temp_status = "ok"
-    temp_error = ""
-    try:
-        temp_client = OpenMeteoClient()
-        temp_df = temp_client.fetch_temperature(fetch_start.date(), fetch_end.date())
-        temp_df = temp_client._fallback_temperature(temp_df)
-    except Exception as e:
-        print(f"OpenMeteo fetch failed: {e}")
-        temp_status = "fetch_failed"
-        temp_error = str(e)
+              # 2. Fetch Temperature Data
+              temp_df = pd.DataFrame()
+              temp_status = "ok"
+              temp_error = ""
+              try:
+                  temp_client = OpenMeteoClient()
+                  temp_df = temp_client.fetch_temperature(fetch_start.date(), fetch_end.date())
+                  temp_df = temp_client._fallback_temperature(temp_df)
+              except Exception as e:
+                  print(f"OpenMeteo fetch failed: {e}")
+                  temp_status = "fetch_failed"
+                  temp_error = str(e)
 
-    # 3. Segment and Save
-    file_count = 0
-    current_h = fetch_start
-    while current_h < fetch_end:
-        h_start = current_h
-        h_end = current_h + timedelta(hours=1)
-        filename = h_start.strftime("%Y-%m-%dT%H-00-00Z.json")
-        
-        if load_status == "ok" and not load_df.empty:
-            h_load = load_df[(load_df['timestamp'] >= h_start) & (load_df['timestamp'] < h_end)].copy()
-            if not h_load.empty:
-                h_load["timestamp"] = h_load["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
-                h_load["fetched_at"] = h_load["fetched_at"].dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
-                h_load.to_json(f"/tmp/load/{filename}", orient="records")
-            else:
-                with open(f"/tmp/load/{filename}", "w") as f: json.dump([], f)
-        else:
-            with open(f"/tmp/load/{filename}", "w") as f:
-                json.dump({"status": load_status, "error": load_error, "data": []}, f)
+              # 3. Segment and Save
+              file_count = 0
+              current_h = fetch_start
+              while current_h < fetch_end:
+                  h_start = current_h
+                  h_end = current_h + timedelta(hours=1)
+                  filename = h_start.strftime("%Y-%m-%dT%H-00-00Z.json")
+                  
+                  if load_status == "ok" and not load_df.empty:
+                      h_load = load_df[(load_df['timestamp'] >= h_start) & (load_df['timestamp'] < h_end)].copy()
+                      if not h_load.empty:
+                          h_load["timestamp"] = h_load["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+                          h_load["fetched_at"] = h_load["fetched_at"].dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+                          h_load.to_json(f"/tmp/load/{filename}", orient="records")
+                      else:
+                          with open(f"/tmp/load/{filename}", "w") as f: json.dump([], f)
+                  else:
+                      with open(f"/tmp/load/{filename}", "w") as f:
+                          json.dump({"status": load_status, "error": load_error, "data": []}, f)
 
-        if temp_status == "ok" and not temp_df.empty:
-            h_temp = temp_df[(temp_df['timestamp'] >= h_start) & (temp_df['timestamp'] < h_end)].copy()
-            if not h_temp.empty:
-                h_temp["timestamp"] = h_temp["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
-                h_temp["fetched_at"] = h_temp["fetched_at"].dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
-                h_temp.to_json(f"/tmp/temperature/{filename}", orient="records")
-            else:
-                with open(f"/tmp/temperature/{filename}", "w") as f: json.dump([], f)
-        else:
-            with open(f"/tmp/temperature/{filename}", "w") as f:
-                json.dump({"status": temp_status, "error": temp_error, "data": []}, f)
-        
-        current_h = h_end
-        file_count += 1
+                  if temp_status == "ok" and not temp_df.empty:
+                      h_temp = temp_df[(temp_df['timestamp'] >= h_start) & (temp_df['timestamp'] < h_end)].copy()
+                      if not h_temp.empty:
+                          h_temp["timestamp"] = h_temp["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+                          h_temp["fetched_at"] = h_temp["fetched_at"].dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+                          h_temp.to_json(f"/tmp/temperature/{filename}", orient="records")
+                      else:
+                          with open(f"/tmp/temperature/{filename}", "w") as f: json.dump([], f)
+                  else:
+                      with open(f"/tmp/temperature/{filename}", "w") as f:
+                          json.dump({"status": temp_status, "error": temp_error, "data": []}, f)
+                  
+                  current_h = h_end
+                  file_count += 1
 
-    print(f"Load rows fetched: {len(load_df)}")
-    print(f"Temperature rows fetched: {len(temp_df)}")
-    print(f"Files written: {file_count}")
+              print(f"Load rows fetched: {len(load_df)}")
+              print(f"Temperature rows fetched: {len(temp_df)}")
+              print(f"Files written: {file_count}")
 
-except Exception as fatal:
-    print(f"CRITICAL ERROR: {fatal}")
-    sys.exit(1)
-EOF
+          except Exception as fatal:
+              print(f"CRITICAL ERROR: {fatal}")
+              sys.exit(1)
+          EOF
 
       - name: Ensure Volume directories exist
         shell: bash
