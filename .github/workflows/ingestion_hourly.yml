@@ -22,7 +22,8 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.11"
-  VOLUME_BASE: "dbfs:/Volumes/workspace/energy_forecasting/raw_ingestion"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  VOLUME_BASE: "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion"
 
 jobs:
   fetch_and_upload:

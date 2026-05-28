@@ -304,8 +304,8 @@ if not dry_run:
 # Moves successfully ingested files to an archive folder to prevent reprocessing.
 
 if not dry_run:
-    ARCHIVE_LOAD_PATH = "/Volumes/workspace/energy_forecasting/raw_ingestion/archive/load"
-    ARCHIVE_TEMP_PATH = "/Volumes/workspace/energy_forecasting/raw_ingestion/archive/temperature"
+    ARCHIVE_LOAD_PATH = "/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/load"
+    ARCHIVE_TEMP_PATH = "/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/temperature"
     
     dbutils.fs.mkdirs(ARCHIVE_LOAD_PATH)
     dbutils.fs.mkdirs(ARCHIVE_TEMP_PATH)
