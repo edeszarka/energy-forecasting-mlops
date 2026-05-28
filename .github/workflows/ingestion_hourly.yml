@@ -1,4 +1,4 @@
-name: "Data Ingestion"
+name: "Ingestion Hourly"
 
 on:
   push:
@@ -49,14 +49,18 @@ jobs:
       - name: Resolve run parameters
         shell: bash
         run: |
-          if [ -n "${{ github.event.inputs.run_date }}" ]; then
-            RUN_DATE="${{ github.event.inputs.run_date }}"
+          # Use workflow inputs if available, otherwise use defaults
+          INPUT_DATE="${{ github.event.inputs.run_date }}"
+          INPUT_LOOKBACK="${{ github.event.inputs.lookback_hours }}"
+          
+          if [ -n "$INPUT_DATE" ]; then
+            RUN_DATE="$INPUT_DATE"
           else
             RUN_DATE=$(python -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat())")
           fi
           
-          if [ -n "${{ github.event.inputs.lookback_hours }}" ]; then
-            LOOKBACK_HOURS="${{ github.event.inputs.lookback_hours }}"
+          if [ -n "$INPUT_LOOKBACK" ]; then
+            LOOKBACK_HOURS="$INPUT_LOOKBACK"
           else
             LOOKBACK_HOURS="2"
           fi
@@ -191,17 +195,9 @@ EOF
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
-          for f in /tmp/load/*.json; do
-            [ -e "$f" ] || continue
-            filename=$(basename "$f")
-            databricks fs cp "$f" "${{ env.VOLUME_BASE }}/load/$filename" --overwrite
-          done
-          
-          for f in /tmp/temperature/*.json; do
-            [ -e "$f" ] || continue
-            filename=$(basename "$f")
-            databricks fs cp "$f" "${{ env.VOLUME_BASE }}/temperature/$filename" --overwrite
-          done
+          # Use find to handle cases where no files are found gracefully
+          find /tmp/load -name "*.json" -exec databricks fs cp {} "${{ env.VOLUME_BASE }}/load/" --overwrite \;
+          find /tmp/temperature -name "*.json" -exec databricks fs cp {} "${{ env.VOLUME_BASE }}/temperature/" --overwrite \;
 
       - name: Trigger Databricks Workflow
         shell: bash
