@@ -1,21 +1,8 @@
 bundle:
   name: energy_forecasting_mlops
 
-# NOTE: Variable interpolation is not supported for workspace.host.
-# The CLI will automatically use the DATABRICKS_HOST environment variable.
-
-environments:
-  default:
-    environment_spec:
-      client: "1"
-      dependencies:
-        - prophet==1.1.5
-        - lightgbm==4.3.0
-        - evidently==0.4.16
-        - mlflow==2.13.0
-        - holidays==0.46
-        - shap==0.45.0
-        - requests==2.31.0
+workspace:
+  host: https://dbc-c6c8d02c-35f6.cloud.databricks.com
 
 resources:
   jobs:
@@ -25,31 +12,49 @@ resources:
         quartz_cron_expression: "0 5 * * * ?"
         timezone_id: "UTC"
       max_concurrent_runs: 1
+      environments:
+        - environment_key: "default"
+          spec:
+            client: "1"
+            dependencies:
+              - prophet==1.1.5
+              - lightgbm==4.3.0
+              - evidently==0.4.16
+              - mlflow==2.13.0
+              - holidays==0.46
+              - shap==0.45.0
+              - requests==2.31.0
+              - pandas>=2.0
+              - numpy>=1.26
+              - pyarrow>=14.0
       tasks:
         - task_key: "ingest"
           notebook_task:
-            notebook_path: "./notebooks/01_ingest.py"
+            notebook_path: ./notebooks/01_ingest.py
           environment_key: "default"
           timeout_seconds: 1800
+
         - task_key: "transform"
           depends_on:
             - task_key: "ingest"
           notebook_task:
-            notebook_path: "./notebooks/02_transform.py"
+            notebook_path: ./notebooks/02_transform.py
           environment_key: "default"
           timeout_seconds: 1800
+
         - task_key: "drift_check"
           depends_on:
             - task_key: "transform"
           notebook_task:
-            notebook_path: "./notebooks/03_drift_check.py"
+            notebook_path: ./notebooks/03_drift_check.py
           environment_key: "default"
           timeout_seconds: 900
+
         - task_key: "predict"
           depends_on:
             - task_key: "drift_check"
           notebook_task:
-            notebook_path: "./notebooks/04_predict.py"
+            notebook_path: ./notebooks/04_predict.py
           environment_key: "default"
           timeout_seconds: 900
 
@@ -59,46 +64,66 @@ resources:
         quartz_cron_expression: "0 0 2 ? * SUN"
         timezone_id: "UTC"
       max_concurrent_runs: 1
+      environments:
+        - environment_key: "default"
+          spec:
+            client: "1"
+            dependencies:
+              - prophet==1.1.5
+              - lightgbm==4.3.0
+              - evidently==0.4.16
+              - mlflow==2.13.0
+              - holidays==0.46
+              - shap==0.45.0
+              - requests==2.31.0
+              - pandas>=2.0
+              - numpy>=1.26
+              - pyarrow>=14.0
       tasks:
         - task_key: "train_prophet"
           notebook_task:
-            notebook_path: "./notebooks/05_train_prophet.py"
+            notebook_path: ./notebooks/05_train_prophet.py
           environment_key: "default"
           timeout_seconds: 3600
+
         - task_key: "train_lgbm"
           notebook_task:
-            notebook_path: "./notebooks/06_train_lgbm.py"
+            notebook_path: ./notebooks/06_train_lgbm.py
           environment_key: "default"
           timeout_seconds: 3600
+
         - task_key: "evaluate"
           depends_on:
             - task_key: "train_prophet"
             - task_key: "train_lgbm"
           notebook_task:
-            notebook_path: "./notebooks/07_evaluate.py"
+            notebook_path: ./notebooks/07_evaluate.py
           environment_key: "default"
           timeout_seconds: 1800
+
         - task_key: "promote_model"
           depends_on:
             - task_key: "evaluate"
           notebook_task:
-            notebook_path: "./notebooks/08_promote_model.py"
+            notebook_path: ./notebooks/08_promote_model.py
           environment_key: "default"
           timeout_seconds: 900
 
 targets:
   dev:
+    mode: development
     workspace:
-      root_path: /Users/${current_user.userName}/.bundle/${bundle.name}/dev
+      root_path: /Workspace/Users/${workspace.current_user.userName}/energy_forecasting_dev
     resources:
       jobs:
         energy_hourly_pipeline:
           schedule:
-            pause_status: "PAUSED"
+            pause_status: PAUSED
         energy_retraining_pipeline:
           schedule:
-            pause_status: "PAUSED"
+            pause_status: PAUSED
+
   prod:
-    workspace:
-      root_path: /Users/${current_user.userName}/.bundle/${bundle.name}/prod
     mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/energy_forecasting_prod

@@ -1,0 +1,375 @@
+# Databricks notebook source
+# %% [markdown]
+# # 08_promote_model
+# **Purpose:** Automate model promotion from Staging/None to Production using Champion/Challenger logic.
+# **Inputs:** 
+# - `workspace.energy_forecasting.model_evaluation`
+# - `workspace.energy_forecasting.drift_control`
+# - `/Volumes/workspace/energy_forecasting/data/flags/retrain_requested.flag`
+# **Outputs:** 
+# - MLflow Model Registry stage transitions
+# - `workspace.energy_forecasting.promotion_log` (Audit trail)
+# **Last Updated:** 2024-05-21
+#
+# **Required:** mlflow>=2.12.0, pandas, pyspark
+
+# COMMAND ----------
+
+import logging
+import json
+import hashlib
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Dict, Optional
+
+import pandas as pd
+import mlflow
+from mlflow.tracking import MlflowClient
+from pyspark.sql import SparkSession, functions as F
+from pyspark.sql.window import Window
+
+# COMMAND ----------
+
+# SECTION 1 — SETUP AND CONFIG
+# ─────────────────────────────
+
+dbutils.widgets.text("mape_improvement_threshold", "0.01")
+dbutils.widgets.text("dry_run", "false")
+dbutils.widgets.text("force_promote", "false")
+
+# Infrastructure Overrides from GEMINI.md
+CATALOG = "workspace"
+SCHEMA = "energy_forecasting"
+VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/data"
+
+CONFIG = {
+    "eval_table": f"{CATALOG}.{SCHEMA}.model_evaluation",
+    "promotion_log_table": f"{CATALOG}.{SCHEMA}.promotion_log",
+    "flag_path": f"{VOLUME_PATH}/flags/retrain_requested.flag",
+    "model_names": ["energy_lgbm_24h", "energy_lgbm_168h", "energy_prophet_24h", "energy_prophet_168h"],
+    "mape_threshold": float(dbutils.widgets.get("mape_improvement_threshold")),
+    "dry_run": dbutils.widgets.get("dry_run").lower() == "true",
+    "force_promote": dbutils.widgets.get("force_promote").lower() == "true",
+}
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("promote_model")
+
+# COMMAND ----------
+
+# SECTION 2 — LOAD EVALUATION RESULTS
+# ──────────────────────────────────────
+
+def load_latest_evaluation(spark: SparkSession, config: dict) -> pd.DataFrame:
+    """
+    Loads the most recent evaluation results for each model from 
+    model_evaluation table where promoted = False.
+    """
+    if not spark.catalog.tableExists(config["eval_table"]):
+        logger.warning(f"Evaluation table {config['eval_table']} does not exist yet. Skipping.")
+        return pd.DataFrame()
+        
+    # Use window function to get latest trained_at per model_name
+    window = Window.partitionBy("model_name").orderBy(F.col("trained_at").desc())
+    
+    eval_df = spark.table(config["eval_table"]) \
+        .filter(F.col("promoted") == False) \
+        .withColumn("rn", F.row_number().over(window)) \
+        .filter(F.col("rn") == 1) \
+        .drop("rn") \
+        .toPandas()
+        
+    if eval_df.empty:
+        logger.info("No unpromoted challengers found in model_evaluation table.")
+        
+    return eval_df
+
+# COMMAND ----------
+
+# SECTION 3 — PROMOTION DECISION LOGIC
+# ───────────────────────────────────────
+
+def decide_promotions(eval_df: pd.DataFrame, mlflow_client: MlflowClient, config: dict) -> List[dict]:
+    """
+    Applies Champion/Challenger rules to each model and decides whether to promote.
+    """
+    decisions = []
+    
+    for _, row in eval_df.iterrows():
+        model_name = row["model_name"]
+        challenger_mape = row["mape"]
+        challenger_run_id = row["run_id"]
+        
+        # Get current Production version
+        try:
+            prod_versions = mlflow_client.get_latest_versions(model_name, stages=["Production"])
+            champion = prod_versions[0] if prod_versions else None
+            
+            if champion:
+                champion_run = mlflow_client.get_run(champion.run_id)
+                champion_mape = champion_run.data.metrics.get("mape")
+                champion_version = champion.version
+                champion_run_id = champion.run_id
+            else:
+                champion_mape = None
+                champion_version = None
+                champion_run_id = None
+                
+        except Exception as e:
+            logger.warning(f"Error querying registry for {model_name}: {e}")
+            continue
+            
+        # Decision Logic
+        first_run = (champion_mape is None or champion_mape == 0.0)
+        should_promote = False
+        reason = ""
+        
+        if config["force_promote"]:
+            should_promote = True
+            reason = "Force promotion requested via widget"
+        elif first_run:
+            should_promote = True
+            reason = "No Production version exists — promoting unconditionally"
+        elif challenger_mape is None or pd.isna(challenger_mape):
+            should_promote = False
+            reason = "Invalid challenger metrics — promotion skipped"
+        else:
+            # Relative improvement comparison
+            threshold = config["mape_threshold"]
+            improvement = (champion_mape - challenger_mape) / champion_mape
+            
+            if improvement > threshold:
+                should_promote = True
+                reason = f"MAPE improved by {improvement:.2%} ({champion_mape:.3f}% -> {challenger_mape:.3f}%)"
+            else:
+                should_promote = False
+                reason = f"Insufficient improvement ({improvement:.2%} < {threshold:.2%}). Keeping champion."
+                
+        decisions.append({
+            "model_name": model_name,
+            "challenger_run_id": challenger_run_id,
+            "challenger_mape": challenger_mape,
+            "champion_run_id": champion_run_id,
+            "champion_version": champion_version,
+            "champion_mape": champion_mape,
+            "should_promote": should_promote,
+            "first_run": first_run,
+            "promotion_reason": reason
+        })
+        
+    return decisions
+
+# COMMAND ----------
+
+# SECTION 4 — EXECUTE PROMOTIONS
+# ─────────────────────────────────
+
+def execute_promotions(decisions: list, mlflow_client: MlflowClient, config: dict) -> List[dict]:
+    """
+    Transitions winning Challengers to Production and archives old versions.
+    """
+    if config["dry_run"]:
+        logger.info("DRY RUN: Skipping actual MLflow transitions.")
+        return decisions
+
+    for d in decisions:
+        if not d["should_promote"]:
+            continue
+            
+        try:
+            # Identify the version number for the challenger run_id
+            # Note: 07_evaluate logs the run_id, we need to find the registered version
+            versions = mlflow_client.search_model_versions(f"run_id='{d['challenger_run_id']}'")
+            if not versions:
+                logger.error(f"No registered version found for run {d['challenger_run_id']}. Skipping.")
+                d["should_promote"] = False
+                continue
+                
+            challenger_version = versions[0].version
+            d["challenger_version"] = challenger_version
+            
+            # Transition to Production (atomically archives existing)
+            # NOTE: MLflow 2.x prefers model aliases. 
+            # Stages are used here for compatibility with Databricks Free Edition.
+            mlflow_client.transition_model_version_stage(
+                name=d["model_name"],
+                version=challenger_version,
+                stage="Production",
+                archive_existing_versions=True
+            )
+            
+            # Add promotion metadata tags
+            run = mlflow_client.get_run(d["challenger_run_id"])
+            training_data_end = run.data.tags.get("training_data_end", "unknown")
+            
+            mlflow_client.set_model_version_tag(
+                name=d["model_name"],
+                version=challenger_version,
+                key="promoted_at",
+                value=datetime.now(timezone.utc).isoformat()
+            )
+            mlflow_client.set_model_version_tag(
+                name=d["model_name"],
+                version=challenger_version,
+                key="training_data_end",
+                value=training_data_end
+            )
+            
+            logger.info(f"Successfully promoted {d['model_name']} v{challenger_version} to Production.")
+            
+        except Exception as e:
+            logger.error(f"Failed to promote {d['model_name']}: {e}")
+            d["should_promote"] = False
+            
+    return decisions
+
+# COMMAND ----------
+
+# SECTION 5 — UPDATE EVALUATION TABLE
+# ──────────────────────────────────────
+
+def mark_promoted_in_eval_table(decisions: list, spark: SparkSession, config: dict) -> None:
+    """Updates the model_evaluation table to mark records as processed."""
+    if config["dry_run"]:
+        return
+
+    for d in decisions:
+        try:
+            # We mark the run as processed regardless of whether it was promoted or skipped
+            spark.sql(f"""
+                UPDATE {config['eval_table']}
+                SET promoted = true
+                WHERE run_id = '{d['challenger_run_id']}'
+            """)
+            logger.info(f"Marked run {d['challenger_run_id']} as processed in eval table.")
+        except Exception as e:
+            logger.error(f"Failed to update eval table for run {d['challenger_run_id']}: {e}")
+
+# COMMAND ----------
+
+# SECTION 6 — WRITE PROMOTION AUDIT LOG
+# ────────────────────────────────────────
+
+def write_promotion_log(
+    decisions: list, 
+    spark: SparkSession, 
+    config: dict, 
+    drift_meta: dict
+) -> None:
+    """Appends decisions to the permanent audit log."""
+    if config["dry_run"] or not decisions:
+        return
+
+    log_rows = []
+    now = datetime.now(timezone.utc)
+    
+    for d in decisions:
+        # Deterministic ID for idempotency
+        p_id = hashlib.md5(f"{d['model_name']}_{d['challenger_run_id']}_{now.isoformat()}".encode()).hexdigest()
+        
+        log_rows.append({
+            "promotion_id": p_id,
+            "promoted_at": now,
+            "model_name": d["model_name"],
+            "challenger_run_id": d["challenger_run_id"],
+            "challenger_version": d.get("challenger_version"),
+            "challenger_mape": float(d["challenger_mape"]) if d["challenger_mape"] else None,
+            "champion_run_id": d["champion_run_id"],
+            "champion_version": d["champion_version"],
+            "champion_mape": float(d["champion_mape"]) if d["champion_mape"] else None,
+            "promotion_reason": d["promotion_reason"],
+            "first_run": bool(d["first_run"]),
+            "drift_triggered": bool(drift_meta["triggered"]),
+            "drifted_features": str(drift_meta["features"]),
+            "promoted_by": "automated_pipeline",
+            "created_at": now
+        })
+
+    # DDL for log table
+    spark.sql(f"""
+    CREATE TABLE IF NOT EXISTS {config['promotion_log_table']} (
+        promotion_id STRING,
+        promoted_at TIMESTAMP,
+        model_name STRING,
+        challenger_run_id STRING,
+        challenger_version STRING,
+        challenger_mape DOUBLE,
+        champion_run_id STRING,
+        champion_version STRING,
+        champion_mape DOUBLE,
+        promotion_reason STRING,
+        first_run BOOLEAN,
+        drift_triggered BOOLEAN,
+        drifted_features STRING,
+        promoted_by STRING,
+        created_at TIMESTAMP
+    ) USING DELTA
+    """)
+    
+    spark.createDataFrame(log_rows).write.format("delta").mode("append").saveAsTable(config["promotion_log_table"])
+    logger.info(f"Written {len(log_rows)} rows to promotion audit log.")
+
+# COMMAND ----------
+
+# SECTION 7 — CLEANUP FLAG FILE
+# ────────────────────────────────
+
+def cleanup_flag_file(config: dict) -> dict:
+    """Reads and deletes the retrain flag file."""
+    p = Path(config["flag_path"])
+    meta = {"triggered": False, "features": ""}
+    
+    if p.exists():
+        try:
+            with open(p) as f:
+                content = json.load(f)
+                meta = {"triggered": True, "features": content.get("drifted_features", [])}
+            
+            if not config["dry_run"]:
+                p.unlink()
+                logger.info("Retrain flag file consumed and deleted.")
+        except Exception as e:
+            logger.error(f"Failed to process/delete flag file: {e}")
+            
+    return meta
+
+# COMMAND ----------
+
+# SECTION 8 — MAIN ORCHESTRATION
+# ────────────────────────────────────────────────
+
+spark.sql(f"USE CATALOG {CATALOG}")
+client = MlflowClient()
+
+if CONFIG["dry_run"]:
+    logger.info("DRY RUN MODE — no MLflow transitions or Delta writes will occur.")
+
+# Load candidates
+eval_pdf = load_latest_evaluation(spark, CONFIG)
+drift_metadata = cleanup_flag_file(CONFIG)
+
+if not eval_pdf.empty:
+    # Logic
+    promo_decisions = decide_promotions(eval_pdf, client, CONFIG)
+    
+    # MLflow
+    final_decisions = execute_promotions(promo_decisions, client, CONFIG)
+    
+    # Persistence
+    mark_promoted_in_eval_table(final_decisions, spark, CONFIG)
+    write_promotion_log(final_decisions, spark, CONFIG, drift_metadata)
+    
+    # Print Summary Table for Job Output
+    print("\n" + "="*64)
+    print(" MODEL PROMOTION SUMMARY")
+    print("="*64)
+    print(pd.DataFrame(final_decisions)[["model_name", "should_promote", "promotion_reason"]].to_string(index=False))
+    print("="*64 + "\n")
+else:
+    logger.info("No unpromoted models to process.")
+
+if CONFIG["dry_run"]:
+    dbutils.notebook.exit("DRY_RUN_COMPLETE")
+else:
+    dbutils.notebook.exit("SUCCESS")
