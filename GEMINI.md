@@ -9,6 +9,15 @@
 - **Compute**: Use serverless compute (`environment_key: "default"` in databricks.yml).
   Do NOT use job_cluster_key or classic cluster definitions.
 
+## CI/CD Proven Patterns (GitHub Actions)
+- **CLI Installation**: Use `databricks/setup-cli@main` AFTER cleaning up legacy `databricks-cli` with `pip uninstall`.
+- **Volume Operations**: Use `databricks fs` commands with the `dbfs:/Volumes/...` prefix. This is the most compatible pattern for remote Volume access via GHA.
+  - Correct: `databricks fs cp <local> dbfs:/Volumes/<catalog>/<schema>/<volume>/<path>`
+  - Correct: `databricks fs mkdirs dbfs:/Volumes/<catalog>/<schema>/<volume>/<path>`
+- **Job Triggering**: Use positional arguments for `run-now` and handle potential JSON array output from `jobs list`.
+  - Trigger: `databricks jobs run-now "$JOB_ID" --no-wait --output json`
+  - Parsing Job ID: `data = json.load(sys.stdin); jobs = data if isinstance(data, list) else data.get('jobs', [])`
+
 ## Split Ingestion Architecture
 Databricks Free Edition has NO outbound internet access. This project uses a **Split Ingestion** pattern:
 
