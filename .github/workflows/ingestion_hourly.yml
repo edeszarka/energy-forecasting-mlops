@@ -57,6 +57,16 @@ jobs:
           # Ensure /usr/local/bin (where curl installs) is prioritized
           echo "/usr/local/bin" >> $GITHUB_PATH
 
+      - name: Verify Databricks authentication
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          echo "Host length: ${#DATABRICKS_HOST}"
+          echo "Token length: ${#DATABRICKS_TOKEN}"
+          echo "Host starts with: ${DATABRICKS_HOST:0:8}"
+          databricks auth describe
+
       - name: Verify CLI installation
         run: |
           which -a databricks
