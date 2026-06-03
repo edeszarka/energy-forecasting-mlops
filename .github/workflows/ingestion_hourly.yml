@@ -51,6 +51,9 @@ jobs:
       - name: Install Databricks CLI
         uses: databricks/setup-cli@main
 
+      - name: Check Databricks Identity
+        run: databricks auth describe
+
       - name: Resolve run parameters
         shell: bash
         run: |
@@ -232,3 +235,4 @@ jobs:
           echo "| Lookback hours | $LOOKBACK_HOURS |" >> $GITHUB_STEP_SUMMARY
           echo "| Databricks run ID | ${DATABRICKS_RUN_ID:-not triggered} |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | ✅ Files uploaded & Pipeline triggered |" >> $GITHUB_STEP_SUMMARY
+
