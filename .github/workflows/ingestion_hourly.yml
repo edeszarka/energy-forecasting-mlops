@@ -48,12 +48,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Install Databricks CLI
+      - name: Cleanup legacy CLI
         run: |
-          curl -fsSL https://raw.githubusercontent.com/databricks/setup-databricks-cli/main/install.sh | sh
+          pip uninstall -y databricks-cli || true
 
-      - name: Check Databricks Identity
-        run: databricks auth describe
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
 
       - name: Resolve run parameters
         shell: bash
