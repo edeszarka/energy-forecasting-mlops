@@ -211,16 +211,16 @@ jobs:
         shell: bash
         run: |
           # Ensure Volume directories exist
-          databricks files mkdir \
+          databricks fs mkdirs \
             "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/load" \
             2>/dev/null || true
-          databricks files mkdir \
+          databricks fs mkdirs \
             "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/temperature" \
             2>/dev/null || true
-          databricks files mkdir \
+          databricks fs mkdirs \
             "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/load" \
             2>/dev/null || true
-          databricks files mkdir \
+          databricks fs mkdirs \
             "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/temperature" \
             2>/dev/null || true
           echo "Volume directories ready."
@@ -234,7 +234,7 @@ jobs:
           for f in /tmp/load/*.json; do
             [ -e "$f" ] || continue
             filename=$(basename "$f")
-            databricks files upload \
+            databricks fs cp \
               "$f" \
               "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/load/${filename}" \
               --overwrite
@@ -245,7 +245,7 @@ jobs:
           for f in /tmp/temperature/*.json; do
             [ -e "$f" ] || continue
             filename=$(basename "$f")
-            databricks files upload \
+            databricks fs cp \
               "$f" \
               "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/temperature/${filename}" \
               --overwrite
