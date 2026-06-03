@@ -47,24 +47,21 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-          # Explicitly remove legacy CLI if it was installed as a dependency
+          # Aggressively remove legacy CLI from all possible locations
           pip uninstall -y databricks-cli || true
+          rm -f $(which databricks) || true
 
-      - name: Install Databricks CLI
-        uses: databricks/setup-cli@main
-
-      - name: Verify Databricks authentication
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      - name: Install modern Databricks CLI
         run: |
-          echo "Host length: ${#DATABRICKS_HOST}"
-          echo "Token length: ${#DATABRICKS_TOKEN}"
-          echo "Host starts with: ${DATABRICKS_HOST:0:8}"
-          databricks auth describe
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-databricks-cli/main/install.sh | sh
+          # Ensure /usr/local/bin (where curl installs) is prioritized
+          echo "/usr/local/bin" >> $GITHUB_PATH
 
-      - name: Verify CLI Version
-        run: databricks --version
+      - name: Verify CLI installation
+        run: |
+          which -a databricks
+          databricks version
+          databricks auth describe
 
       - name: Resolve run parameters
         shell: bash
