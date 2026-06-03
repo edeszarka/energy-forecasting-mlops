@@ -47,24 +47,27 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-          # Aggressively remove legacy CLI from all possible locations
-          pip uninstall -y databricks-cli || true
-          rm -f /usr/local/bin/databricks || true
 
-      - name: Install Databricks CLI
-        uses: databricks/setup-cli@main
+      - name: Aggressive CLI Isolation
+        run: |
+          # 1. Uninstall legacy Python CLI
+          python -m pip uninstall -y databricks-cli || true
+          
+          # 2. Delete any conflicting binaries in system paths
+          sudo rm -f /usr/local/bin/databricks || true
+          sudo rm -f /usr/bin/databricks || true
+          
+          # 3. Install the modern Go-based CLI (v0.200+)
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-databricks-cli/main/install.sh | sh
+          
+          # 4. Verify absolute path and version
+          /usr/local/bin/databricks -v
 
       - name: Verify Databricks authentication
         run: |
           echo "Host length: ${#DATABRICKS_HOST}"
           echo "Token length: ${#DATABRICKS_TOKEN}"
-          echo "Host starts with: ${DATABRICKS_HOST:0:8}"
-          databricks auth describe
-
-      - name: Verify CLI installation
-        run: |
-          which -a databricks
-          databricks version
+          /usr/local/bin/databricks auth describe
 
       - name: Resolve run parameters
         shell: bash
@@ -206,33 +209,24 @@ jobs:
 
       - name: Ensure Volume directories exist
         shell: bash
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
-          # From outside Databricks, Unity Catalog Volumes are accessed via
-          # the Files API using /api/2.0/fs/directories endpoint.
-          # The databricks files command is the correct CLI verb for this.
-          
-          databricks files mkdir \
+          # Use absolute path to modern CLI to bypass version conflicts
+          /usr/local/bin/databricks files mkdir \
             "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/load" \
             2>/dev/null || true
-          databricks files mkdir \
+          /usr/local/bin/databricks files mkdir \
             "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/temperature" \
             2>/dev/null || true
-          databricks files mkdir \
+          /usr/local/bin/databricks files mkdir \
             "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/load" \
             2>/dev/null || true
-          databricks files mkdir \
+          /usr/local/bin/databricks files mkdir \
             "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/temperature" \
             2>/dev/null || true
           echo "Volume directories ready."
 
       - name: Upload JSON files to Databricks Volume
         shell: bash
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
           LOAD_COUNT=0
           TEMP_COUNT=0
@@ -240,7 +234,7 @@ jobs:
           for f in /tmp/load/*.json; do
             [ -e "$f" ] || continue
             filename=$(basename "$f")
-            databricks files upload \
+            /usr/local/bin/databricks files upload \
               "$f" \
               "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/load/${filename}" \
               --overwrite
@@ -251,7 +245,7 @@ jobs:
           for f in /tmp/temperature/*.json; do
             [ -e "$f" ] || continue
             filename=$(basename "$f")
-            databricks files upload \
+            /usr/local/bin/databricks files upload \
               "$f" \
               "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/temperature/${filename}" \
               --overwrite
@@ -268,15 +262,16 @@ jobs:
       - name: Trigger Databricks Workflow
         shell: bash
         run: |
-          JOB_ID=$(databricks jobs list --output json | \
+          # Use absolute path to modern CLI
+          JOB_ID=$(/usr/local/bin/databricks jobs list --output json | \
             python3 -c "import json, sys; jobs = json.load(sys.stdin).get('jobs', []); match = [j for j in jobs if j['settings']['name'] == 'energy_hourly_pipeline']; print(match[0]['job_id'] if match else '')")
           
           if [ -z "$JOB_ID" ]; then
-            echo "::warning::Job 'energy_hourly_pipeline' not found - skipping trigger. Deploy the bundle first."
+            echo "::warning::Job 'energy_hourly_pipeline' not found - skipping trigger."
             exit 0
           fi
           
-          RUN_RESPONSE=$(databricks jobs run-now --job-id "$JOB_ID")
+          RUN_RESPONSE=$(/usr/local/bin/databricks jobs run-now --job-id "$JOB_ID")
           RUN_ID=$(echo "$RUN_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['run_id'])")
           
           echo "Triggered job run: $RUN_ID"
