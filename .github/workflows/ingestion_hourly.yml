@@ -206,29 +206,64 @@ jobs:
 
       - name: Ensure Volume directories exist
         shell: bash
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
-          # Use databricks fs with direct /Volumes paths for compatibility
-          databricks fs mkdirs "${{ env.VOLUME_BASE }}/load"
-          databricks fs mkdirs "${{ env.VOLUME_BASE }}/temperature"
-          databricks fs mkdirs "${{ env.VOLUME_BASE }}/archive/load"
-          databricks fs mkdirs "${{ env.VOLUME_BASE }}/archive/temperature"
+          # From outside Databricks, Unity Catalog Volumes are accessed via
+          # the Files API using /api/2.0/fs/directories endpoint.
+          # The databricks files command is the correct CLI verb for this.
+          
+          databricks files mkdir \
+            "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/load" \
+            2>/dev/null || true
+          databricks files mkdir \
+            "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/temperature" \
+            2>/dev/null || true
+          databricks files mkdir \
+            "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/load" \
+            2>/dev/null || true
+          databricks files mkdir \
+            "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/temperature" \
+            2>/dev/null || true
+          echo "Volume directories ready."
 
-      - name: Upload JSON files to Databricks
+      - name: Upload JSON files to Databricks Volume
         shell: bash
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
+          LOAD_COUNT=0
+          TEMP_COUNT=0
+          
           for f in /tmp/load/*.json; do
             [ -e "$f" ] || continue
             filename=$(basename "$f")
-            databricks fs cp "$f" "${{ env.VOLUME_BASE }}/load/$filename" --overwrite
+            databricks files upload \
+              "$f" \
+              "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/load/${filename}" \
+              --overwrite
+            LOAD_COUNT=$((LOAD_COUNT + 1))
             echo "Uploaded load: $filename"
           done
           
           for f in /tmp/temperature/*.json; do
             [ -e "$f" ] || continue
             filename=$(basename "$f")
-            databricks fs cp "$f" "${{ env.VOLUME_BASE }}/temperature/$filename" --overwrite
+            databricks files upload \
+              "$f" \
+              "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/temperature/${filename}" \
+              --overwrite
+            TEMP_COUNT=$((TEMP_COUNT + 1))
             echo "Uploaded temp: $filename"
           done
+          
+          echo "Upload complete: $LOAD_COUNT load files, $TEMP_COUNT temperature files."
+          
+          if [ "$LOAD_COUNT" -eq 0 ]; then
+            echo "::warning::No load files were uploaded. Check the fetch step."
+          fi
 
       - name: Trigger Databricks Workflow
         shell: bash
