@@ -23,7 +23,7 @@ concurrency:
 env:
   PYTHON_VERSION: "3.11"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  VOLUME_BASE: "dbfs:/Volumes/workspace/energy_forecasting/raw_ingestion"
+  VOLUME_BASE: "/Volumes/workspace/energy_forecasting/data/raw_ingestion"
   DATABRICKS_BUNDLE_TARGET: "prod"
 
 jobs:
