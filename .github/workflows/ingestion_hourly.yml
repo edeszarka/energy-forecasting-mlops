@@ -49,18 +49,12 @@ jobs:
           pip install -e ".[dev]"
           # Aggressively remove legacy CLI from all possible locations
           pip uninstall -y databricks-cli || true
-          rm -f $(which databricks) || true
+          rm -f /usr/local/bin/databricks || true
 
-      - name: Install modern Databricks CLI
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/databricks/setup-databricks-cli/main/install.sh | sh
-          # Ensure /usr/local/bin (where curl installs) is prioritized
-          echo "/usr/local/bin" >> $GITHUB_PATH
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
 
       - name: Verify Databricks authentication
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
           echo "Host length: ${#DATABRICKS_HOST}"
           echo "Token length: ${#DATABRICKS_TOKEN}"
@@ -71,7 +65,6 @@ jobs:
         run: |
           which -a databricks
           databricks version
-          databricks auth describe
 
       - name: Resolve run parameters
         shell: bash
@@ -214,6 +207,7 @@ jobs:
       - name: Ensure Volume directories exist
         shell: bash
         run: |
+          # Use databricks fs with direct /Volumes paths for compatibility
           databricks fs mkdirs "${{ env.VOLUME_BASE }}/load"
           databricks fs mkdirs "${{ env.VOLUME_BASE }}/temperature"
           databricks fs mkdirs "${{ env.VOLUME_BASE }}/archive/load"
@@ -263,4 +257,3 @@ jobs:
           echo "| Lookback hours | $LOOKBACK_HOURS |" >> $GITHUB_STEP_SUMMARY
           echo "| Databricks run ID | ${DATABRICKS_RUN_ID:-not triggered} |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | ✅ Files uploaded & Pipeline triggered |" >> $GITHUB_STEP_SUMMARY
-
