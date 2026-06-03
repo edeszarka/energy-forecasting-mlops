@@ -204,10 +204,10 @@ jobs:
       - name: Ensure Volume directories exist
         shell: bash
         run: |
-          databricks files mkdir "${{ env.VOLUME_BASE }}/load"
-          databricks files mkdir "${{ env.VOLUME_BASE }}/temperature"
-          databricks files mkdir "${{ env.VOLUME_BASE }}/archive/load"
-          databricks files mkdir "${{ env.VOLUME_BASE }}/archive/temperature"
+          databricks fs mkdirs "${{ env.VOLUME_BASE }}/load"
+          databricks fs mkdirs "${{ env.VOLUME_BASE }}/temperature"
+          databricks fs mkdirs "${{ env.VOLUME_BASE }}/archive/load"
+          databricks fs mkdirs "${{ env.VOLUME_BASE }}/archive/temperature"
 
       - name: Upload JSON files to Databricks
         shell: bash
@@ -215,14 +215,14 @@ jobs:
           for f in /tmp/load/*.json; do
             [ -e "$f" ] || continue
             filename=$(basename "$f")
-            databricks files upload "${{ env.VOLUME_BASE }}/load/$filename" "$f" --overwrite
+            databricks fs cp "$f" "${{ env.VOLUME_BASE }}/load/$filename" --overwrite
             echo "Uploaded load: $filename"
           done
           
           for f in /tmp/temperature/*.json; do
             [ -e "$f" ] || continue
             filename=$(basename "$f")
-            databricks files upload "${{ env.VOLUME_BASE }}/temperature/$filename" "$f" --overwrite
+            databricks fs cp "$f" "${{ env.VOLUME_BASE }}/temperature/$filename" --overwrite
             echo "Uploaded temp: $filename"
           done
 
