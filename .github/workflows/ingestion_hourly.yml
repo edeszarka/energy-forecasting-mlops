@@ -195,18 +195,27 @@ jobs:
       - name: Ensure Volume directories exist
         shell: bash
         run: |
-          # The Databricks CLI uses dbfs:/Volumes prefix to interact with Unity Catalog Volumes via the Files API
-          databricks fs mkdirs "${{ env.VOLUME_BASE }}/load"
-          databricks fs mkdirs "${{ env.VOLUME_BASE }}/temperature"
-          databricks fs mkdirs "${{ env.VOLUME_BASE }}/archive/load"
-          databricks fs mkdirs "${{ env.VOLUME_BASE }}/archive/temperature"
+          databricks files mkdir "${{ env.VOLUME_BASE }}/load"
+          databricks files mkdir "${{ env.VOLUME_BASE }}/temperature"
+          databricks files mkdir "${{ env.VOLUME_BASE }}/archive/load"
+          databricks files mkdir "${{ env.VOLUME_BASE }}/archive/temperature"
 
       - name: Upload JSON files to Databricks
         shell: bash
         run: |
-          # Use find to handle cases where no files are found gracefully
-          find /tmp/load -name "*.json" -exec databricks fs cp {} "${{ env.VOLUME_BASE }}/load/" --overwrite \;
-          find /tmp/temperature -name "*.json" -exec databricks fs cp {} "${{ env.VOLUME_BASE }}/temperature/" --overwrite \;
+          for f in /tmp/load/*.json; do
+            [ -e "$f" ] || continue
+            filename=$(basename "$f")
+            databricks files upload "${{ env.VOLUME_BASE }}/load/$filename" "$f" --overwrite
+            echo "Uploaded load: $filename"
+          done
+          
+          for f in /tmp/temperature/*.json; do
+            [ -e "$f" ] || continue
+            filename=$(basename "$f")
+            databricks files upload "${{ env.VOLUME_BASE }}/temperature/$filename" "$f" --overwrite
+            echo "Uploaded temp: $filename"
+          done
 
       - name: Trigger Databricks Workflow
         shell: bash
