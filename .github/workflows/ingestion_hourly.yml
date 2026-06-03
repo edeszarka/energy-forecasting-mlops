@@ -56,18 +56,18 @@ jobs:
           # 2. Delete any conflicting binaries in system paths
           sudo rm -f /usr/local/bin/databricks || true
           sudo rm -f /usr/bin/databricks || true
-          
-          # 3. Install the modern Go-based CLI (v0.200+)
-          curl -fsSL https://raw.githubusercontent.com/databricks/setup-databricks-cli/main/install.sh | sh
-          
-          # 4. Verify absolute path and version
-          /usr/local/bin/databricks -v
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Verify Databricks CLI
+        run: databricks -v
 
       - name: Verify Databricks authentication
         run: |
           echo "Host length: ${#DATABRICKS_HOST}"
           echo "Token length: ${#DATABRICKS_TOKEN}"
-          /usr/local/bin/databricks auth describe
+          databricks auth describe
 
       - name: Resolve run parameters
         shell: bash
@@ -210,17 +210,17 @@ jobs:
       - name: Ensure Volume directories exist
         shell: bash
         run: |
-          # Use absolute path to modern CLI to bypass version conflicts
-          /usr/local/bin/databricks files mkdir \
+          # Ensure Volume directories exist
+          databricks files mkdir \
             "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/load" \
             2>/dev/null || true
-          /usr/local/bin/databricks files mkdir \
+          databricks files mkdir \
             "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/temperature" \
             2>/dev/null || true
-          /usr/local/bin/databricks files mkdir \
+          databricks files mkdir \
             "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/load" \
             2>/dev/null || true
-          /usr/local/bin/databricks files mkdir \
+          databricks files mkdir \
             "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/temperature" \
             2>/dev/null || true
           echo "Volume directories ready."
@@ -234,7 +234,7 @@ jobs:
           for f in /tmp/load/*.json; do
             [ -e "$f" ] || continue
             filename=$(basename "$f")
-            /usr/local/bin/databricks files upload \
+            databricks files upload \
               "$f" \
               "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/load/${filename}" \
               --overwrite
@@ -245,7 +245,7 @@ jobs:
           for f in /tmp/temperature/*.json; do
             [ -e "$f" ] || continue
             filename=$(basename "$f")
-            /usr/local/bin/databricks files upload \
+            databricks files upload \
               "$f" \
               "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/temperature/${filename}" \
               --overwrite
@@ -262,8 +262,7 @@ jobs:
       - name: Trigger Databricks Workflow
         shell: bash
         run: |
-          # Use absolute path to modern CLI
-          JOB_ID=$(/usr/local/bin/databricks jobs list --output json | \
+          JOB_ID=$(databricks jobs list --output json | \
             python3 -c "import json, sys; jobs = json.load(sys.stdin).get('jobs', []); match = [j for j in jobs if j['settings']['name'] == 'energy_hourly_pipeline']; print(match[0]['job_id'] if match else '')")
           
           if [ -z "$JOB_ID" ]; then
@@ -271,7 +270,7 @@ jobs:
             exit 0
           fi
           
-          RUN_RESPONSE=$(/usr/local/bin/databricks jobs run-now --job-id "$JOB_ID")
+          RUN_RESPONSE=$(databricks jobs run-now --job-id "$JOB_ID")
           RUN_ID=$(echo "$RUN_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['run_id'])")
           
           echo "Triggered job run: $RUN_ID"
