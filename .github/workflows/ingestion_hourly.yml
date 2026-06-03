@@ -23,12 +23,15 @@ concurrency:
 env:
   PYTHON_VERSION: "3.11"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  VOLUME_BASE: "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion"
+  VOLUME_BASE: "dbfs:/Volumes/workspace/energy_forecasting/raw_ingestion"
   DATABRICKS_BUNDLE_TARGET: "prod"
 
 jobs:
   fetch_and_upload:
     runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -188,9 +191,6 @@ jobs:
 
       - name: Ensure Volume directories exist
         shell: bash
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
           # The Databricks CLI uses dbfs:/Volumes prefix to interact with Unity Catalog Volumes via the Files API
           databricks fs mkdirs "${{ env.VOLUME_BASE }}/load"
@@ -200,9 +200,6 @@ jobs:
 
       - name: Upload JSON files to Databricks
         shell: bash
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
           # Use find to handle cases where no files are found gracefully
           find /tmp/load -name "*.json" -exec databricks fs cp {} "${{ env.VOLUME_BASE }}/load/" --overwrite \;
@@ -210,9 +207,6 @@ jobs:
 
       - name: Trigger Databricks Workflow
         shell: bash
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
           JOB_ID=$(databricks jobs list --output json | \
             python3 -c "import json, sys; jobs = json.load(sys.stdin).get('jobs', []); match = [j for j in jobs if j['settings']['name'] == 'energy_hourly_pipeline']; print(match[0]['job_id'] if match else '')")
@@ -222,7 +216,7 @@ jobs:
             exit 0
           fi
           
-          RUN_RESPONSE=$(databricks jobs run-now --job-id "$JOB_ID" --job-parameters "{\"run_date\": \"$RUN_DATE\", \"dry_run\": \"false\", \"lookback_files\": \"$LOOKBACK_HOURS\"}")
+          RUN_RESPONSE=$(databricks jobs run-now --job-id "$JOB_ID")
           RUN_ID=$(echo "$RUN_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['run_id'])")
           
           echo "Triggered job run: $RUN_ID"
