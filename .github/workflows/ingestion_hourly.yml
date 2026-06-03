@@ -263,7 +263,7 @@ jobs:
         shell: bash
         run: |
           JOB_ID=$(databricks jobs list --output json | \
-            python3 -c "import json, sys; jobs = json.load(sys.stdin).get('jobs', []); match = [j for j in jobs if j['settings']['name'] == 'energy_hourly_pipeline']; print(match[0]['job_id'] if match else '')")
+            python3 -c "import json, sys; data = json.load(sys.stdin); jobs = data if isinstance(data, list) else data.get('jobs', []); match = [j for j in jobs if j.get('settings', {}).get('name') == 'energy_hourly_pipeline']; print(match[0]['job_id'] if match else '')")
           
           if [ -z "$JOB_ID" ]; then
             echo "::warning::Job 'energy_hourly_pipeline' not found - skipping trigger."
