@@ -270,7 +270,7 @@ jobs:
             exit 0
           fi
           
-          RUN_RESPONSE=$(databricks jobs run-now --job-id "$JOB_ID")
+          RUN_RESPONSE=$(databricks jobs run-now "$JOB_ID" --no-wait --output json)
           RUN_ID=$(echo "$RUN_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['run_id'])")
           
           echo "Triggered job run: $RUN_ID"
