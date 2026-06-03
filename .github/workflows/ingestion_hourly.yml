@@ -47,18 +47,24 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+          # Explicitly remove legacy CLI if it was installed as a dependency
+          pip uninstall -y databricks-cli || true
 
-      - name: Install modern Databricks CLI
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Verify Databricks authentication
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
-          # Install the modern Go-based CLI (supports 'files' and 'bundle')
-          curl -fsSL https://raw.githubusercontent.com/databricks/setup-databricks-cli/main/install.sh | sh
-          # Force /usr/local/bin to the front of the PATH to override legacy Python CLI
-          echo "/usr/local/bin" >> $GITHUB_PATH
+          echo "Host length: ${#DATABRICKS_HOST}"
+          echo "Token length: ${#DATABRICKS_TOKEN}"
+          echo "Host starts with: ${DATABRICKS_HOST:0:8}"
+          databricks auth describe
 
       - name: Verify CLI Version
-        run: |
-          databricks --version
-          databricks auth describe
+        run: databricks --version
 
       - name: Resolve run parameters
         shell: bash
