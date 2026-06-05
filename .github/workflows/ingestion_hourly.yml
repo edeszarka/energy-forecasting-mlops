@@ -69,6 +69,12 @@ jobs:
           echo "Token length: ${#DATABRICKS_TOKEN}"
           databricks auth describe
 
+      - name: Network Diagnostic
+        run: |
+          echo "Testing DNS for ENTSO-E..."
+          nslookup transparency.entsoe.eu || echo "NSLOOKUP failed"
+          curl -I https://transparency.entsoe.eu/api || echo "CURL failed"
+
       - name: Resolve run parameters
         shell: bash
         run: |

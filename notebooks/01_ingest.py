@@ -55,7 +55,7 @@ import json
 from pathlib import PurePosixPath
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
-    StructType, StructField, TimestampType, DoubleType, StringType, BooleanType
+    StructType, StructField, TimestampType, DoubleType, StringType, BooleanType, IntegerType
 )
 from pyspark.sql.utils import AnalysisException
 from delta.tables import DeltaTable
@@ -331,6 +331,12 @@ dbutils.notebook.exit(json.dumps({
     "status": "success",
     "files_found": len(found_load_files),
     "files_missing": len(missing_load_files),
+    "rows_ingested": int(load_count),
+    "dry_run": dry_run,
+    "run_id": run_id,
+    "run_date": run_date.isoformat(),
+}))
+
     "rows_ingested": int(load_count),
     "dry_run": dry_run,
     "run_id": run_id,
