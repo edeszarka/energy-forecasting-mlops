@@ -75,6 +75,14 @@ jobs:
           nslookup transparency.entsoe.eu || echo "NSLOOKUP failed"
           curl -I https://transparency.entsoe.eu/api || echo "CURL failed"
 
+      - name: Diagnose ENTSO-E key
+        shell: bash
+        env:
+          ENTSO_E_API_KEY: ${{ secrets.ENTSO_E_API_KEY }}
+        run: |
+          echo "Key length: ${#ENTSO_E_API_KEY}"
+          echo "Key prefix: ${ENTSO_E_API_KEY:0:8}"
+
       - name: Resolve run parameters
         shell: bash
         run: |
