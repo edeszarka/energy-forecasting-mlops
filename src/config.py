@@ -16,7 +16,7 @@ from pathlib import PurePosixPath
 from typing import Final
 
 # API CONFIGURATION
-ENTSO_E_BASE_URL: Final[str] = "https://transparency.entsoe.eu/api"
+ENTSO_E_BASE_URL: Final[str] = "https://web-api.transparency.entsoe.eu/api"
 ENTSO_E_ZONE: Final[str] = "10YHU-MAVIR----U"
 ENTSO_E_DOC_TYPE: Final[str] = "A65"   # Actual Total Load
 ENTSO_E_PROCESS_TYPE: Final[str] = "A16"   # Realised
