@@ -19,7 +19,22 @@
 
 # COMMAND ----------
 
-# Cell 1: Widgets
+# Cell 1: Environment Setup
+# Adds the project root to sys.path to allow importing from the 'src' directory.
+
+import sys
+import os
+from pathlib import Path
+
+# In Databricks, the working directory is the folder containing the notebook.
+# We add the parent directory (project root) to sys.path.
+root_path = str(Path(os.getcwd()).parent)
+if root_path not in sys.path:
+    sys.path.append(root_path)
+
+# COMMAND ----------
+
+# Cell 2: Widgets
 # Handles runtime parameters and resolves the execution date.
 
 from datetime import datetime, timezone, timedelta
@@ -331,12 +346,6 @@ dbutils.notebook.exit(json.dumps({
     "status": "success",
     "files_found": len(found_load_files),
     "files_missing": len(missing_load_files),
-    "rows_ingested": int(load_count),
-    "dry_run": dry_run,
-    "run_id": run_id,
-    "run_date": run_date.isoformat(),
-}))
-
     "rows_ingested": int(load_count),
     "dry_run": dry_run,
     "run_id": run_id,
