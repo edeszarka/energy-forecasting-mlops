@@ -143,7 +143,24 @@ if not eval_rows:
     raise ValueError("No challenger models found to evaluate.")
 
 # Write results to Delta
-eval_df = spark.createDataFrame(eval_rows)
+EVAL_SCHEMA = StructType([
+    StructField("model_name", StringType(), False),
+    StructField("horizon_hours", IntegerType(), False),
+    StructField("challenger_run_id", StringType(), False),
+    StructField("challenger_mae", DoubleType(), True),
+    StructField("challenger_rmse", DoubleType(), True),
+    StructField("challenger_mape", DoubleType(), True),
+    StructField("champion_run_id", StringType(), True),
+    StructField("champion_mae", DoubleType(), True),
+    StructField("champion_rmse", DoubleType(), True),
+    StructField("champion_mape", DoubleType(), True),
+    StructField("challenger_wins", BooleanType(), False),
+    StructField("first_run", BooleanType(), False),
+    StructField("evaluated_at", TimestampType(), False),
+    StructField("promoted", BooleanType(), False)
+])
+
+eval_df = spark.createDataFrame(eval_rows, schema=EVAL_SCHEMA)
 eval_df.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(CONFIG["eval_table"])
 
 # Print recommendation summary

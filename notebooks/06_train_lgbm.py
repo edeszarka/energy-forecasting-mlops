@@ -100,6 +100,7 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
         # Reference Window Metadata
         training_data_end = train_df['timestamp'].max()
         training_data_start = train_df['timestamp'].min()
+        mlflow.set_tag("model_name", model_name) # Added for discovery
         mlflow.set_tag("training_data_end", training_data_end.isoformat())
         mlflow.set_tag("training_data_start", training_data_start.isoformat())
 

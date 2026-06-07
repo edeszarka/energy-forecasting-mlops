@@ -38,6 +38,9 @@ import mlflow
 from mlflow.tracking import MlflowClient
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.window import Window
+from pyspark.sql.types import (
+    StructType, StructField, StringType, TimestampType, DoubleType, BooleanType
+)
 
 # COMMAND ----------
 
@@ -80,8 +83,8 @@ def load_latest_evaluation(spark: SparkSession, config: dict) -> pd.DataFrame:
         logger.warning(f"Evaluation table {config['eval_table']} does not exist yet. Skipping.")
         return pd.DataFrame()
         
-    # Use window function to get latest trained_at per model_name
-    window = Window.partitionBy("model_name").orderBy(F.col("trained_at").desc())
+    # Use window function to get latest evaluated_at per model_name
+    window = Window.partitionBy("model_name").orderBy(F.col("evaluated_at").desc())
     
     eval_df = spark.table(config["eval_table"]) \
         .filter(F.col("promoted") == False) \
@@ -261,9 +264,9 @@ def write_promotion_log(
             "challenger_run_id": d["challenger_run_id"],
             "challenger_version": d.get("challenger_version"),
             "challenger_mape": float(d["challenger_mape"]) if d["challenger_mape"] else None,
-            "champion_run_id": d["champion_run_id"],
-            "champion_version": d["champion_version"],
-            "champion_mape": float(d["champion_mape"]) if d["champion_mape"] else None,
+            "champion_run_id": d.get("champion_run_id"),
+            "champion_version": d.get("champion_version"),
+            "champion_mape": float(d["champion_mape"]) if d.get("champion_mape") else None,
             "promotion_reason": d["promotion_reason"],
             "first_run": bool(d["first_run"]),
             "drift_triggered": bool(drift_meta["triggered"]),
@@ -271,6 +274,25 @@ def write_promotion_log(
             "promoted_by": "automated_pipeline",
             "created_at": now
         })
+
+    # Define schema explicitly to avoid inference errors with nulls
+    LOG_SCHEMA = StructType([
+        StructField("promotion_id", StringType(), False),
+        StructField("promoted_at", TimestampType(), False),
+        StructField("model_name", StringType(), False),
+        StructField("challenger_run_id", StringType(), False),
+        StructField("challenger_version", StringType(), True),
+        StructField("challenger_mape", DoubleType(), True),
+        StructField("champion_run_id", StringType(), True),
+        StructField("champion_version", StringType(), True),
+        StructField("champion_mape", DoubleType(), True),
+        StructField("promotion_reason", StringType(), True),
+        StructField("first_run", BooleanType(), False),
+        StructField("drift_triggered", BooleanType(), False),
+        StructField("drifted_features", StringType(), True),
+        StructField("promoted_by", StringType(), False),
+        StructField("created_at", TimestampType(), False)
+    ])
 
     # DDL for log table
     spark.sql(f"""
@@ -293,7 +315,7 @@ def write_promotion_log(
     ) USING DELTA
     """)
     
-    spark.createDataFrame(log_rows).write.format("delta").mode("append").saveAsTable(config["promotion_log_table"])
+    spark.createDataFrame(log_rows, schema=LOG_SCHEMA).write.format("delta").mode("append").saveAsTable(config["promotion_log_table"])
     logger.info(f"Written {len(log_rows)} rows to promotion audit log.")
 
 # COMMAND ----------

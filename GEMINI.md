@@ -150,3 +150,38 @@ Content: JSON with keys: triggered_at, reason, consecutive_drift_hours, drifted_
 Written by: 03_drift_check.py
 Read and deleted by: 08_promote_model.py
 If file exists when 03 runs: skip writing (retrain already pending)
+
+## Databricks Free Edition / Serverless Workarounds
+
+### 1. Manual Notebook Dependency Management
+Manual notebook runs do not inherit the environment from `databricks.yml`. Every notebook MUST include a bootstrap cell at the top:
+```python
+# MAGIC %pip install -r ../requirements.txt
+dbutils.library.restartPython()
+```
+
+### 2. Module Imports (sys.path)
+To import from the `src/` directory in a notebook, add the parent directory to `sys.path`:
+```python
+import sys, os
+from pathlib import Path
+root_path = str(Path(os.getcwd()).parent)
+if root_path not in sys.path:
+    sys.path.append(root_path)
+```
+
+### 3. Model Registry IAM Restrictions (AccessDenied)
+The Databricks Free Edition Serverless compute is denied `s3:PutObject` access to the model storage bucket. This prevents `mlflow.register_model()` from working.
+- **Solution**: Use the **Run-based MLOps Pattern** (see below).
+
+## Run-based MLOps Pattern (Tag-based)
+Since the Model Registry is blocked, we manage the model lifecycle using MLflow Run Tags:
+- **Identification**: Every training run MUST set the `model_name` tag.
+- **Promotion**: Instead of transitioning stages, notebook `08_promote_model.py` tags the winning run with `production="true"` and sets the former champion to `production="false"`.
+- **Loading**: Notebook `04_predict.py` uses `mlflow_client.search_runs()` with `filter_string="tags.production = 'true'"` and `order_by="metrics.mape ASC"` to find the best production model.
+- **Model Type Safety**: During prediction, always use `type(model).__name__` to distinguish between LGBM and Prophet objects to prevent feature count mismatches.
+
+## Backlog & Future Improvements
+- **Technical Debt**: Centralize Volume paths in `src/config.py` instead of hardcoding in notebooks.
+- **Robustness**: Implement automated Bronze backfilling triggered directly from the ingestion notebook if data is missing.
+- **Features**: Add humidity and cloud cover to the training set to improve solar/consumption accuracy.
