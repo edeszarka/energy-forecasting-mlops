@@ -1,4 +1,14 @@
 # Databricks notebook source
+# COMMAND ----------
+
+# MAGIC %pip install -r ../requirements.txt
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 # %% [markdown]
 # # 05_train_prophet
 # **Purpose:** Train two Prophet models (24h and 168h horizons) using Hungarian energy consumption data.
@@ -11,11 +21,23 @@
 # COMMAND ----------
 
 import logging
+import os
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import numpy as np
 import mlflow
+from mlflow.models import infer_signature
 from prophet import Prophet
+import cmdstanpy
+
+# Fix for MLflow model registration in Databricks Unity Catalog
+os.environ['MLFLOW_USE_DATABRICKS_SDK_MODEL_ARTIFACTS_REPO_FOR_UC'] = 'True'
+
+if tuple(int(x) for x in cmdstanpy.__version__.split(".")[:2]) >= (1, 2):
+    raise ImportError(
+        f"cmdstanpy {cmdstanpy.__version__} is incompatible with prophet 1.1.5. "
+        "Pin cmdstanpy>=1.1,<1.2 in requirements.txt."
+    )
 from pyspark.sql import functions as F
 
 # COMMAND ----------
@@ -95,18 +117,21 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
         # Reference Window Metadata
         training_data_end = train_df['ds'].max()
         training_data_start = train_df['ds'].min()
+        mlflow.set_tag("model_name", model_name) # Added for discovery
         mlflow.set_tag("training_data_end", training_data_end.isoformat())
         mlflow.set_tag("training_data_start", training_data_start.isoformat())
 
-        # Log and Register model
-        mlflow.prophet.log_model(model, artifact_path="model")
-        mlflow.register_model(
-            model_uri=f"runs:/{run.info.run_id}/model",
-            name=model_name,
-            tags={"horizon": f"{horizon_hours}h", "model_type": "prophet"}
+        # Log model (This works as it logs to the tracking server)
+        signature = infer_signature(
+            model_input=test_df[['ds', 'temperature_c']],
+            model_output=forecast[['yhat']],
         )
+        mlflow.prophet.log_model(model, artifact_path="model", signature=signature)
+        
+        logger.info(f"Model {model_name} trained and logged to run {run.info.run_id}")
         
         return {
+            "run_id": run.info.run_id,  # Return run_id so we can find it later
             "model_name": model_name,
             "mae": mae, "rmse": rmse, "mape": mape,
             "n_train": len(train_df), "n_test": len(test_df)

@@ -1,4 +1,14 @@
 # Databricks notebook source
+# COMMAND ----------
+
+# MAGIC %pip install -r ../requirements.txt
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 # %% [markdown]
 # # 06_train_lgbm
 # **Purpose:** Train two LightGBM models (24h and 168h horizons) using a direct multi-step approach.
@@ -12,6 +22,7 @@
 
 import logging
 import json
+import os
 from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
@@ -21,6 +32,9 @@ import shap
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from pyspark.sql import functions as F
+
+# Fix for MLflow model registration in Databricks Unity Catalog
+os.environ['MLFLOW_USE_DATABRICKS_SDK_MODEL_ARTIFACTS_REPO_FOR_UC'] = 'True'
 
 # COMMAND ----------
 
@@ -86,6 +100,7 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
         # Reference Window Metadata
         training_data_end = train_df['timestamp'].max()
         training_data_start = train_df['timestamp'].min()
+        mlflow.set_tag("model_name", model_name) # Added for discovery
         mlflow.set_tag("training_data_end", training_data_end.isoformat())
         mlflow.set_tag("training_data_start", training_data_start.isoformat())
 
@@ -98,10 +113,17 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
             plt.tight_layout(); plt.savefig("shap_summary.png"); mlflow.log_artifact("shap_summary.png"); plt.close()
         except Exception as e:
             logger.warning(f"SHAP failed: {e}"); mlflow.set_tag("shap_failed", True)
-
+        # Log model
         mlflow.lightgbm.log_model(model, artifact_path="model")
-        mlflow.register_model(model_uri=f"runs:/{run.info.run_id}/model", name=model_name, tags={"horizon": f"{horizon_hours}h", "model_type": "lgbm"})
-        return {"model_name": model_name, "mae": mae, "rmse": rmse, "mape": mape, "n_train": len(train_df), "n_test": len(test_df)}
+        
+        logger.info(f"Model {model_name} trained and logged to run {run.info.run_id}")
+        
+        return {
+            "run_id": run.info.run_id,
+            "model_name": model_name, 
+            "mae": mae, "rmse": rmse, "mape": mape, 
+            "n_train": len(train_df), "n_test": len(test_df)
+        }
 
 # COMMAND ----------
 

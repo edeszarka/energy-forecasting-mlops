@@ -1,4 +1,14 @@
 # Databricks notebook source
+# COMMAND ----------
+
+# MAGIC %pip install -r ../requirements.txt
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 # %% [markdown]
 # # 04_predict
 # **Purpose:** Load Production models from MLflow, generate 24h and 168h forecasts, and backfill past actuals.
@@ -37,6 +47,11 @@ dbutils.widgets.text("horizon_hours", "both")
 CATALOG = "workspace"
 SCHEMA = "energy_forecasting"
 
+try:
+    pipeline_run_id = dbutils.notebook.entry_point.getDbutils().notebook().getContext().currentRunId().getOrElse(lambda: "manual")
+except:
+    pipeline_run_id = "manual"
+
 CONFIG = {
     "silver_table": f"{CATALOG}.{SCHEMA}.silver_features",
     "forecast_table": f"{CATALOG}.{SCHEMA}.gold_forecasts",
@@ -48,7 +63,7 @@ CONFIG = {
     ],
     "force_backfill": dbutils.widgets.get("force_backfill").lower() == "true",
     "horizon_hours": dbutils.widgets.get("horizon_hours"),
-    "pipeline_run_id": dbutils.notebook.entry_point.getDbutils().notebook().getContext().currentRunId().getOrElse(lambda: "manual")
+    "pipeline_run_id": pipeline_run_id
 }
 
 # Hungarian Public Holidays (Static placeholder)
@@ -60,24 +75,49 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("predict")
 
 class ModelNotFoundError(Exception):
-    """Raised when a Production model is missing from Registry."""
+    """Raised when a Production model is missing from Registry or Runs."""
     pass
 
 # COMMAND ----------
 
-# SECTION 2 — MODEL LOADING WITH FALLBACK
-# ─────────────────────────────────────────
+# SECTION 2 — MODEL LOADING FROM RUNS (Workaround for IAM Restrictions)
+# ───────────────────────────────────────────────────────────────────────
 
-def load_production_model(model_name: str, mlflow_client: MlflowClient) -> Tuple[Any, str, str]:
-    """Loads the Production version of a model."""
+def load_best_model_from_runs(model_name: str, mlflow_client: MlflowClient) -> Tuple[Any, str, str]:
+    """
+    Searches across all experiments for the latest successful run of a model 
+    and loads its artifact. This replaces the Registry-based loading.
+    """
     try:
-        version_info = mlflow_client.get_latest_versions(model_name, stages=["Production"])
-        if not version_info:
-            raise ModelNotFoundError(f"No Production version found for {model_name}.")
+        # Search all available experiments
+        exp_ids = [e.experiment_id for e in mlflow_client.search_experiments()]
         
-        version = version_info[0].version
-        run_id = version_info[0].run_id
-        model_uri = f"models:/{model_name}/Production"
+        # 1. Try to find the run tagged as 'production'
+        runs = mlflow_client.search_runs(
+            experiment_ids=exp_ids,
+            filter_string=f"tags.model_name = '{model_name}' AND tags.production = 'true'",
+            order_by=["metrics.mape ASC"],
+            max_results=1
+        )
+        
+        best_run = runs[0] if runs else None
+        
+        # 2. Fallback: just get the best historic run (useful for first-time runs)
+        if not best_run:
+            logger.info(f"No production run found for {model_name}, searching for best historic run.")
+            runs = mlflow_client.search_runs(
+                experiment_ids=exp_ids,
+                filter_string=f"tags.model_name = '{model_name}'",
+                order_by=["metrics.mape ASC"],
+                max_results=1
+            )
+            best_run = runs[0] if runs else None
+
+        if not best_run:
+            raise ModelNotFoundError(f"No successful runs found for {model_name}.")
+        
+        run_id = best_run.info.run_id
+        model_uri = f"runs:/{run_id}/model"
         
         if "lgbm" in model_name:
             model = mlflow.lightgbm.load_model(model_uri)
@@ -86,11 +126,11 @@ def load_production_model(model_name: str, mlflow_client: MlflowClient) -> Tuple
         else:
             model = mlflow.pyfunc.load_model(model_uri)
             
-        logger.info(f"Loaded {model_name} version {version} from Production.")
-        return model, version, run_id
+        logger.info(f"Loaded {model_name} from Run ID {run_id} (MAPE: {best_run.data.metrics.get('mape'):.4f})")
+        return model, "run_latest", run_id
     except Exception as e:
         if isinstance(e, ModelNotFoundError): raise
-        raise RuntimeError(f"Error loading {model_name}: {e}")
+        raise RuntimeError(f"Error searching for {model_name}: {e}")
 
 def load_models_with_fallback(config: dict, mlflow_client: MlflowClient) -> Dict[int, Tuple[Any, str, str]]:
     """Tries LGBM, falls back to Prophet if missing."""
@@ -99,13 +139,13 @@ def load_models_with_fallback(config: dict, mlflow_client: MlflowClient) -> Dict
         primary = f"energy_lgbm_{h}h"
         fallback = f"energy_prophet_{h}h"
         try:
-            loaded[h] = load_production_model(primary, mlflow_client)
+            loaded[h] = load_best_model_from_runs(primary, mlflow_client)
         except ModelNotFoundError:
-            logger.warning(f"{primary} not found, trying fallback {fallback}")
+            logger.warning(f"{primary} not found in runs, trying fallback {fallback}")
             try:
-                loaded[h] = load_production_model(fallback, mlflow_client)
+                loaded[h] = load_best_model_from_runs(fallback, mlflow_client)
             except ModelNotFoundError:
-                raise RuntimeError(f"No Production model available for horizon {h}h.")
+                raise RuntimeError(f"No successful runs available for horizon {h}h.")
     return loaded
 
 # COMMAND ----------
@@ -147,18 +187,18 @@ def prepare_inference_features(
             
         row = {
             "timestamp": t,
-            "hour_of_day": t.hour,
-            "day_of_week": t.weekday(),
-            "month": t.month,
-            "is_weekend": 1 if t.weekday() >= 5 else 0,
-            "is_holiday": is_holiday,
             "temperature_c": temp_c,
             "lag_24h": get_lag(t - timedelta(hours=24)),
             "lag_48h": get_lag(t - timedelta(hours=48)),
             "lag_168h": get_lag(t - timedelta(hours=168)),
             "rolling_7d_mean": history_pd["value_mwh"].tail(168).mean(),
             "rolling_7d_std": history_pd["value_mwh"].tail(168).std() or 0.0,
-            "rolling_24h_mean": history_pd["value_mwh"].tail(24).mean()
+            "rolling_24h_mean": history_pd["value_mwh"].tail(24).mean(),
+            "hour_of_day": t.hour,
+            "day_of_week": t.weekday(),
+            "month": t.month,
+            "is_weekend": 1 if t.weekday() >= 5 else 0,
+            "is_holiday": is_holiday
         }
         future_rows.append(row)
         
@@ -180,11 +220,26 @@ def generate_forecasts(
     config: dict
 ) -> pd.DataFrame:
     """Inference loop."""
+    # Strict 12-feature list to match training (06_train_lgbm)
+    MODEL_FEATURES = [
+        'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
+        'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
+        'hour_of_day', 'day_of_week', 'month',
+        'is_weekend', 'is_holiday'
+    ]
+    
+    # Force alignment and log for debugging
+    X = features_df[MODEL_FEATURES].copy()
+    print(f"DEBUG: X shape: {X.shape}")
+    print(f"DEBUG: X columns: {X.columns.tolist()}")
+    logger.info(f"Model Input: {X.shape[1]} features. Columns: {list(X.columns)}")
+    
     if "lgbm" in model_name:
-        X = features_df[config["feature_columns"]]
+        print(f"DEBUG: Calling LGBM predict for {model_name} (Run: {run_id})")
         preds = np.clip(model.predict(X), a_min=0, a_max=None)
     else: # Prophet
-        p_df = features_df.reset_index().rename(columns={"timestamp": "ds", "temperature_c": "temperature_c"})
+        print(f"DEBUG: Calling Prophet predict for {model_name} (Run: {run_id})")
+        p_df = X.reset_index().rename(columns={"timestamp": "ds"})
         forecast = model.predict(p_df)
         preds = forecast["yhat"].clip(lower=0).values
         
@@ -282,15 +337,19 @@ for h in horizons:
     logger.info(f"Starting forecast for {h}h horizon...")
     model, ver, r_id = models_dict[h]
     
-    # Determine actual model name from the loaded model metadata
+    # Determine actual model name from the loaded model object type
     lgbm_name = f"energy_lgbm_{h}h"
     prophet_name = f"energy_prophet_{h}h"
     
-    try:
-        lgbm_versions = mlflow_client.get_latest_versions(lgbm_name, stages=["Production"])
-        actual_model_name = lgbm_name if lgbm_versions and lgbm_versions[0].run_id == r_id else prophet_name
-    except Exception:
+    # Check model type directly from the object (Fixes feature mismatch errors)
+    model_type_name = type(model).__name__
+    if "LGBM" in model_type_name or "LightGBM" in model_type_name:
+        actual_model_name = lgbm_name
+    elif "Prophet" in model_type_name:
         actual_model_name = prophet_name
+    else:
+        # Fallback: check if it has lgbm-specific methods
+        actual_model_name = lgbm_name if hasattr(model, 'booster_') else prophet_name
     
     feats = prepare_inference_features(spark, CONFIG, h, forecast_run_at)
     forecasts_df = generate_forecasts(

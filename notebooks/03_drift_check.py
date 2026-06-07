@@ -1,4 +1,14 @@
 # Databricks notebook source
+# COMMAND ----------
+
+# MAGIC %pip install -r ../requirements.txt
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 # %% [markdown]
 # # 03_drift_check
 # **Purpose:** Monitor data drift and prediction drift using Evidently AI.

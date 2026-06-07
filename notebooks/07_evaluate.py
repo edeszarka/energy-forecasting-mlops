@@ -1,4 +1,14 @@
 # Databricks notebook source
+# COMMAND ----------
+
+# MAGIC %pip install -r ../requirements.txt
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 # %% [markdown]
 # # 07_evaluate
 # **Purpose:** Compare new Challenger models against current Production versions.
@@ -34,21 +44,41 @@ client = MlflowClient()
 
 # COMMAND ----------
 
-def get_model_metrics(model_name: str, stage: str):
-    """Retrieves metrics for a specific model version from MLflow."""
+def get_run_metrics(model_name: str, type_filter: str):
+    """
+    Retrieves metrics for a model from MLflow Runs.
+    - If type_filter is 'challenger', returns the latest successful run.
+    - If type_filter is 'champion', returns the historic run with lowest MAPE.
+    """
     try:
-        latest_versions = client.get_latest_versions(model_name, stages=[stage])
-        if not latest_versions:
-            # Check for "None" if Staging/Production is empty (useful for first runs)
-            latest_versions = client.get_latest_versions(model_name, stages=["None"])
-            if not latest_versions:
-                return None
+        # Search for runs with this model_name
+        # Note: We filter by model_name tag we added in notebooks 05/06
+        runs = client.search_runs(
+            experiment_ids=[r.experiment_id for r in client.search_experiments()],
+            filter_string=f"tags.model_name = '{model_name}'",
+            order_by=["attributes.start_time DESC"] if type_filter == 'challenger' else ["metrics.mape ASC"],
+            max_results=5
+        )
+        
+        if not runs:
+            return None
             
-        version = latest_versions[0]
-        run = client.get_run(version.run_id)
+        # For challenger, just take the absolute latest
+        # For champion, take the best one that isn't the current challenger
+        if type_filter == 'challenger':
+            run = runs[0]
+        else:
+            # The champion is the best performing run that is NOT the one we just trained
+            # (Assuming the challenger is the very latest run)
+            latest_run_id = runs[0].info.run_id
+            candidates = [r for r in runs if r.info.run_id != latest_run_id]
+            if not candidates:
+                return None
+            run = candidates[0]
+
         metrics = run.data.metrics
         return {
-            "run_id": version.run_id,
+            "run_id": run.info.run_id,
             "mae": metrics.get("mae"),
             "rmse": metrics.get("rmse"),
             "mape": metrics.get("mape"),
@@ -56,7 +86,7 @@ def get_model_metrics(model_name: str, stage: str):
             "n_test": int(metrics.get("n_test", 0))
         }
     except Exception as e:
-        logger.warning(f"Error fetching {stage} version for {model_name}: {e}")
+        logger.warning(f"Error fetching {type_filter} run for {model_name}: {e}")
         return None
 
 # COMMAND ----------
@@ -71,10 +101,10 @@ eval_rows = []
 for name in model_names:
     horizon = 24 if "24h" in name else 168
     
-    # Challenger is the latest version (usually in "None" or "Staging")
-    challenger = get_model_metrics(name, "None")
-    # Champion is in "Production"
-    champion = get_model_metrics(name, "Production")
+    # Challenger is the latest run
+    challenger = get_run_metrics(name, "challenger")
+    # Champion is the best historic run
+    champion = get_run_metrics(name, "champion")
     
     first_run = champion is None
     challenger_wins = False
@@ -113,7 +143,24 @@ if not eval_rows:
     raise ValueError("No challenger models found to evaluate.")
 
 # Write results to Delta
-eval_df = spark.createDataFrame(eval_rows)
+EVAL_SCHEMA = StructType([
+    StructField("model_name", StringType(), False),
+    StructField("horizon_hours", IntegerType(), False),
+    StructField("challenger_run_id", StringType(), False),
+    StructField("challenger_mae", DoubleType(), True),
+    StructField("challenger_rmse", DoubleType(), True),
+    StructField("challenger_mape", DoubleType(), True),
+    StructField("champion_run_id", StringType(), True),
+    StructField("champion_mae", DoubleType(), True),
+    StructField("champion_rmse", DoubleType(), True),
+    StructField("champion_mape", DoubleType(), True),
+    StructField("challenger_wins", BooleanType(), False),
+    StructField("first_run", BooleanType(), False),
+    StructField("evaluated_at", TimestampType(), False),
+    StructField("promoted", BooleanType(), False)
+])
+
+eval_df = spark.createDataFrame(eval_rows, schema=EVAL_SCHEMA)
 eval_df.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(CONFIG["eval_table"])
 
 # Print recommendation summary
