@@ -102,32 +102,33 @@ def load_latest_evaluation(spark: SparkSession, config: dict) -> pd.DataFrame:
 
 def decide_promotions(eval_df: pd.DataFrame, mlflow_client: MlflowClient, config: dict) -> List[dict]:
     """
-    Applies Champion/Challenger rules to each model and decides whether to promote.
+    Applies Champion/Challenger rules using MLflow Run tags (production=true).
     """
     decisions = []
     
     for _, row in eval_df.iterrows():
         model_name = row["model_name"]
-        challenger_mape = row["mape"]
-        challenger_run_id = row["run_id"]
+        challenger_mape = row["challenger_mape"]
+        challenger_run_id = row["challenger_run_id"]
         
-        # Get current Production version
+        # Get current 'Production' run by searching tags
         try:
-            prod_versions = mlflow_client.get_latest_versions(model_name, stages=["Production"])
-            champion = prod_versions[0] if prod_versions else None
+            prod_runs = mlflow_client.search_runs(
+                experiment_ids=[r.experiment_id for r in mlflow_client.search_experiments()],
+                filter_string=f"tags.model_name = '{model_name}' AND tags.production = 'true'",
+                max_results=1
+            )
+            champion = prod_runs[0] if prod_runs else None
             
             if champion:
-                champion_run = mlflow_client.get_run(champion.run_id)
-                champion_mape = champion_run.data.metrics.get("mape")
-                champion_version = champion.version
-                champion_run_id = champion.run_id
+                champion_mape = champion.data.metrics.get("mape")
+                champion_run_id = champion.info.run_id
             else:
                 champion_mape = None
-                champion_version = None
                 champion_run_id = None
                 
         except Exception as e:
-            logger.warning(f"Error querying registry for {model_name}: {e}")
+            logger.warning(f"Error querying production run for {model_name}: {e}")
             continue
             
         # Decision Logic
@@ -161,7 +162,6 @@ def decide_promotions(eval_df: pd.DataFrame, mlflow_client: MlflowClient, config
             "challenger_run_id": challenger_run_id,
             "challenger_mape": challenger_mape,
             "champion_run_id": champion_run_id,
-            "champion_version": champion_version,
             "champion_mape": champion_mape,
             "should_promote": should_promote,
             "first_run": first_run,
@@ -172,15 +172,16 @@ def decide_promotions(eval_df: pd.DataFrame, mlflow_client: MlflowClient, config
 
 # COMMAND ----------
 
-# SECTION 4 — EXECUTE PROMOTIONS
-# ─────────────────────────────────
+# SECTION 4 — EXECUTE PROMOTIONS (Tag-based Workaround)
+# ──────────────────────────────────────────────────────
 
 def execute_promotions(decisions: list, mlflow_client: MlflowClient, config: dict) -> List[dict]:
     """
-    Transitions winning Challengers to Production and archives old versions.
+    Simulates promotion by tagging winning runs with production=true and
+    removing that tag from former champions.
     """
     if config["dry_run"]:
-        logger.info("DRY RUN: Skipping actual MLflow transitions.")
+        logger.info("DRY RUN: Skipping actual MLflow tag updates.")
         return decisions
 
     for d in decisions:
@@ -188,48 +189,23 @@ def execute_promotions(decisions: list, mlflow_client: MlflowClient, config: dic
             continue
             
         try:
-            # Identify the version number for the challenger run_id
-            # Note: 07_evaluate logs the run_id, we need to find the registered version
-            versions = mlflow_client.search_model_versions(f"run_id='{d['challenger_run_id']}'")
-            if not versions:
-                logger.error(f"No registered version found for run {d['challenger_run_id']}. Skipping.")
-                d["should_promote"] = False
-                continue
-                
-            challenger_version = versions[0].version
-            d["challenger_version"] = challenger_version
+            # 1. Remove production tag from old champion
+            if d["champion_run_id"]:
+                mlflow_client.set_tag(d["champion_run_id"], "production", "false")
+                logger.info(f"Former champion {d['champion_run_id']} tagged production=false")
+
+            # 2. Tag new challenger as production
+            mlflow_client.set_tag(d["challenger_run_id"], "production", "true")
             
-            # Transition to Production (atomically archives existing)
-            # NOTE: MLflow 2.x prefers model aliases. 
-            # Stages are used here for compatibility with Databricks Free Edition.
-            mlflow_client.transition_model_version_stage(
-                name=d["model_name"],
-                version=challenger_version,
-                stage="Production",
-                archive_existing_versions=True
-            )
-            
-            # Add promotion metadata tags
+            # Add metadata tags for prediction/drift logic
             run = mlflow_client.get_run(d["challenger_run_id"])
             training_data_end = run.data.tags.get("training_data_end", "unknown")
+            mlflow_client.set_tag(d["challenger_run_id"], "promoted_at", datetime.now(timezone.utc).isoformat())
             
-            mlflow_client.set_model_version_tag(
-                name=d["model_name"],
-                version=challenger_version,
-                key="promoted_at",
-                value=datetime.now(timezone.utc).isoformat()
-            )
-            mlflow_client.set_model_version_tag(
-                name=d["model_name"],
-                version=challenger_version,
-                key="training_data_end",
-                value=training_data_end
-            )
-            
-            logger.info(f"Successfully promoted {d['model_name']} v{challenger_version} to Production.")
+            logger.info(f"Successfully promoted {d['model_name']} (Run {d['challenger_run_id']}) via MLflow tags.")
             
         except Exception as e:
-            logger.error(f"Failed to promote {d['model_name']}: {e}")
+            logger.error(f"Failed to tag {d['model_name']}: {e}")
             d["should_promote"] = False
             
     return decisions

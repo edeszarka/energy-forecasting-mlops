@@ -70,24 +70,53 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("predict")
 
 class ModelNotFoundError(Exception):
-    """Raised when a Production model is missing from Registry."""
+    """Raised when a Production model is missing from Registry or Runs."""
     pass
 
 # COMMAND ----------
 
-# SECTION 2 — MODEL LOADING WITH FALLBACK
-# ─────────────────────────────────────────
+# SECTION 2 — MODEL LOADING FROM RUNS (Workaround for IAM Restrictions)
+# ───────────────────────────────────────────────────────────────────────
 
-def load_production_model(model_name: str, mlflow_client: MlflowClient) -> Tuple[Any, str, str]:
-    """Loads the Production version of a model."""
+def load_best_model_from_runs(model_name: str, mlflow_client: MlflowClient) -> Tuple[Any, str, str]:
+    """
+    Searches the experiment for the latest successful run of a model 
+    and loads its artifact. This replaces the Registry-based loading.
+    """
     try:
-        version_info = mlflow_client.get_latest_versions(model_name, stages=["Production"])
-        if not version_info:
-            raise ModelNotFoundError(f"No Production version found for {model_name}.")
+        # Search for runs with this model_name in the tags or run_name
+        # Note: In our training notebooks, we use run_name=f"{type}_{horizon}h"
+        query = f"tags.mlflow.runName LIKE '%{model_name.replace('energy_', '')}%'"
+        runs = mlflow_client.search_runs(
+            experiment_ids=[mlflow.get_experiment_by_name(mlflow.get_experiment(mlflow.active_run().info.experiment_id).name).experiment_id], 
+            filter_string="", # We'll filter manually for better control
+            order_by=["metrics.mape ASC"], # Get the one with lowest error
+            max_results=20
+        )
         
-        version = version_info[0].version
-        run_id = version_info[0].run_id
-        model_uri = f"models:/{model_name}/Production"
+        # Manually filter for the specific model name in tags or name
+        best_run = None
+        for r in runs:
+            if model_name in r.data.tags.get("mlflow.runName", "") or \
+               model_name in r.data.tags.get("model_name", ""):
+                best_run = r
+                break
+        
+        if not best_run:
+            # Fallback: search by model_name tag (which we added in the return dict)
+            runs = mlflow_client.search_runs(
+                experiment_ids=[r.experiment_id for r in mlflow_client.search_experiments()],
+                filter_string=f"tags.model_name = '{model_name}'",
+                order_by=["attributes.start_time DESC"]
+            )
+            if runs:
+                best_run = runs[0]
+
+        if not best_run:
+            raise ModelNotFoundError(f"No successful runs found for {model_name}.")
+        
+        run_id = best_run.info.run_id
+        model_uri = f"runs:/{run_id}/model"
         
         if "lgbm" in model_name:
             model = mlflow.lightgbm.load_model(model_uri)
@@ -96,11 +125,11 @@ def load_production_model(model_name: str, mlflow_client: MlflowClient) -> Tuple
         else:
             model = mlflow.pyfunc.load_model(model_uri)
             
-        logger.info(f"Loaded {model_name} version {version} from Production.")
-        return model, version, run_id
+        logger.info(f"Loaded {model_name} from Run ID {run_id} (MAPE: {best_run.data.metrics.get('mape'):.4f})")
+        return model, "run_latest", run_id
     except Exception as e:
         if isinstance(e, ModelNotFoundError): raise
-        raise RuntimeError(f"Error loading {model_name}: {e}")
+        raise RuntimeError(f"Error searching for {model_name}: {e}")
 
 def load_models_with_fallback(config: dict, mlflow_client: MlflowClient) -> Dict[int, Tuple[Any, str, str]]:
     """Tries LGBM, falls back to Prophet if missing."""
@@ -109,13 +138,13 @@ def load_models_with_fallback(config: dict, mlflow_client: MlflowClient) -> Dict
         primary = f"energy_lgbm_{h}h"
         fallback = f"energy_prophet_{h}h"
         try:
-            loaded[h] = load_production_model(primary, mlflow_client)
+            loaded[h] = load_best_model_from_runs(primary, mlflow_client)
         except ModelNotFoundError:
-            logger.warning(f"{primary} not found, trying fallback {fallback}")
+            logger.warning(f"{primary} not found in runs, trying fallback {fallback}")
             try:
-                loaded[h] = load_production_model(fallback, mlflow_client)
+                loaded[h] = load_best_model_from_runs(fallback, mlflow_client)
             except ModelNotFoundError:
-                raise RuntimeError(f"No Production model available for horizon {h}h.")
+                raise RuntimeError(f"No successful runs available for horizon {h}h.")
     return loaded
 
 # COMMAND ----------
