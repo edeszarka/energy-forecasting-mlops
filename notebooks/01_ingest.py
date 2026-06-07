@@ -1,4 +1,14 @@
 # Databricks notebook source
+# COMMAND ----------
+
+# MAGIC %pip install -r ../requirements.txt
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC # 01_ingest
 # MAGIC 
@@ -122,11 +132,11 @@ TEMPERATURE_TABLE_SCHEMA = StructType(TEMPERATURE_BRONZE_SCHEMA.fields + [
 
 # COMMAND ----------
 
-# Cell 4: Resolve file paths to ingest
+# Cell 5: Resolve file paths to ingest
 # Identifies which JSON files exist in the Volume for the given lookback window.
 
-VOLUME_LOAD_PATH = "/Volumes/workspace/energy_forecasting/raw_ingestion/load"
-VOLUME_TEMP_PATH = "/Volumes/workspace/energy_forecasting/raw_ingestion/temperature"
+VOLUME_LOAD_PATH = "/Volumes/workspace/energy_forecasting/data/raw_ingestion/load"
+VOLUME_TEMP_PATH = "/Volumes/workspace/energy_forecasting/data/raw_ingestion/temperature"
 
 found_load_files = []
 missing_load_files = []

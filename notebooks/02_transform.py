@@ -1,4 +1,14 @@
 # Databricks notebook source
+# COMMAND ----------
+
+# MAGIC %pip install -r ../requirements.txt
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC # 02_transform
 # MAGIC 
@@ -112,6 +122,8 @@ SILVER_SCHEMA = StructType([
     StructField("temperature_lag_24h", DoubleType(), True),
     StructField("is_temp_imputed", BooleanType(), False),
     StructField("temp_missing", BooleanType(), False),
+    StructField("source", StringType(), True),
+    StructField("fetched_at", TimestampType(), True),
     StructField("feature_built_at", TimestampType(), False),
     StructField("run_id", StringType(), False)
 ])
@@ -179,6 +191,11 @@ bronze_load_df = bronze_load_df.dropDuplicates(["timestamp"])
 # Cell 7: Convert to pandas and build feature matrix
 # Bridges Spark and Pandas to utilize the shared feature engineering library.
 
+if load_count < MIN_TRAINING_ROWS:
+    msg = f"Insufficient data for feature engineering. Required: {MIN_TRAINING_ROWS}, Actual: {load_count}"
+    logger.warning(msg)
+    dbutils.notebook.exit(json.dumps({"status": "skipped", "reason": "insufficient_data", "message": msg}))
+
 load_pd = bronze_load_df.toPandas()
 temp_pd = bronze_temp_df.toPandas()
 
@@ -188,7 +205,6 @@ temp_pd["timestamp"] = pd.to_datetime(temp_pd["timestamp"], utc=True)
 
 # Build features
 feature_pd = build_feature_matrix(load_pd, temp_pd)
-
 logger.info(f"Feature matrix built: {feature_pd.shape}")
 
 # COMMAND ----------
@@ -218,6 +234,10 @@ if not high_nan.empty:
 feature_pd["run_id"] = run_id
 feature_pd["country"] = ENTSO_E_ZONE
 
+# Reorder columns to match schema exactly (prevents Arrow positional errors)
+schema_cols = [f.name for f in SILVER_SCHEMA.fields]
+feature_pd = feature_pd[schema_cols]
+
 # Convert to Spark
 silver_spark_df = spark.createDataFrame(feature_pd, schema=SILVER_SCHEMA)
 
@@ -230,7 +250,7 @@ if not dry_run:
     DeltaTable.createIfNotExists(spark) \
         .tableName(f"{CATALOG}.{SCHEMA}.silver_features") \
         .addColumns(SILVER_SCHEMA) \
-        .partitionedBy("country", F.expr("date(timestamp)")) \
+        .partitionedBy("country") \
         .property("delta.autoOptimize.optimizeWrite", "true") \
         .property("delta.autoOptimize.autoCompact", "true") \
         .property("delta.enableChangeDataFeed", "true") \
@@ -253,7 +273,9 @@ if not dry_run:
      .execute()
     
     history = delta_silver.history(1).collect()[0]
-    logger.info(f"Silver Merge: {history['numTargetRowsInserted']} inserted, {history['numTargetRowsUpdated']} updated.")
+    history_dict = history.asDict()
+    metrics = history_dict.get("operationMetrics", {})
+    logger.info(f"Silver Merge: {metrics.get('numTargetRowsInserted', 0)} inserted, {metrics.get('numTargetRowsUpdated', 0)} updated.")
 
 # COMMAND ----------
 
