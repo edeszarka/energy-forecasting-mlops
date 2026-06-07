@@ -47,6 +47,11 @@ dbutils.widgets.text("horizon_hours", "both")
 CATALOG = "workspace"
 SCHEMA = "energy_forecasting"
 
+try:
+    pipeline_run_id = dbutils.notebook.entry_point.getDbutils().notebook().getContext().currentRunId().getOrElse(lambda: "manual")
+except:
+    pipeline_run_id = "manual"
+
 CONFIG = {
     "silver_table": f"{CATALOG}.{SCHEMA}.silver_features",
     "forecast_table": f"{CATALOG}.{SCHEMA}.gold_forecasts",
@@ -58,7 +63,7 @@ CONFIG = {
     ],
     "force_backfill": dbutils.widgets.get("force_backfill").lower() == "true",
     "horizon_hours": dbutils.widgets.get("horizon_hours"),
-    "pipeline_run_id": dbutils.notebook.entry_point.getDbutils().notebook().getContext().currentRunId().getOrElse(lambda: "manual")
+    "pipeline_run_id": pipeline_run_id
 }
 
 # Hungarian Public Holidays (Static placeholder)
@@ -80,37 +85,33 @@ class ModelNotFoundError(Exception):
 
 def load_best_model_from_runs(model_name: str, mlflow_client: MlflowClient) -> Tuple[Any, str, str]:
     """
-    Searches the experiment for the latest successful run of a model 
+    Searches across all experiments for the latest successful run of a model 
     and loads its artifact. This replaces the Registry-based loading.
     """
     try:
-        # Search for runs with this model_name in the tags or run_name
-        # Note: In our training notebooks, we use run_name=f"{type}_{horizon}h"
-        query = f"tags.mlflow.runName LIKE '%{model_name.replace('energy_', '')}%'"
+        # Search all available experiments
+        exp_ids = [e.experiment_id for e in mlflow_client.search_experiments()]
+        
+        # 1. Try to find the run tagged as 'production'
         runs = mlflow_client.search_runs(
-            experiment_ids=[mlflow.get_experiment_by_name(mlflow.get_experiment(mlflow.active_run().info.experiment_id).name).experiment_id], 
-            filter_string="", # We'll filter manually for better control
-            order_by=["metrics.mape ASC"], # Get the one with lowest error
-            max_results=20
+            experiment_ids=exp_ids,
+            filter_string=f"tags.model_name = '{model_name}' AND tags.production = 'true'",
+            order_by=["metrics.mape ASC"],
+            max_results=1
         )
         
-        # Manually filter for the specific model name in tags or name
-        best_run = None
-        for r in runs:
-            if model_name in r.data.tags.get("mlflow.runName", "") or \
-               model_name in r.data.tags.get("model_name", ""):
-                best_run = r
-                break
+        best_run = runs[0] if runs else None
         
+        # 2. Fallback: just get the best historic run (useful for first-time runs)
         if not best_run:
-            # Fallback: search by model_name tag (which we added in the return dict)
+            logger.info(f"No production run found for {model_name}, searching for best historic run.")
             runs = mlflow_client.search_runs(
-                experiment_ids=[r.experiment_id for r in mlflow_client.search_experiments()],
+                experiment_ids=exp_ids,
                 filter_string=f"tags.model_name = '{model_name}'",
-                order_by=["attributes.start_time DESC"]
+                order_by=["metrics.mape ASC"],
+                max_results=1
             )
-            if runs:
-                best_run = runs[0]
+            best_run = runs[0] if runs else None
 
         if not best_run:
             raise ModelNotFoundError(f"No successful runs found for {model_name}.")
@@ -186,18 +187,18 @@ def prepare_inference_features(
             
         row = {
             "timestamp": t,
-            "hour_of_day": t.hour,
-            "day_of_week": t.weekday(),
-            "month": t.month,
-            "is_weekend": 1 if t.weekday() >= 5 else 0,
-            "is_holiday": is_holiday,
             "temperature_c": temp_c,
             "lag_24h": get_lag(t - timedelta(hours=24)),
             "lag_48h": get_lag(t - timedelta(hours=48)),
             "lag_168h": get_lag(t - timedelta(hours=168)),
             "rolling_7d_mean": history_pd["value_mwh"].tail(168).mean(),
             "rolling_7d_std": history_pd["value_mwh"].tail(168).std() or 0.0,
-            "rolling_24h_mean": history_pd["value_mwh"].tail(24).mean()
+            "rolling_24h_mean": history_pd["value_mwh"].tail(24).mean(),
+            "hour_of_day": t.hour,
+            "day_of_week": t.weekday(),
+            "month": t.month,
+            "is_weekend": 1 if t.weekday() >= 5 else 0,
+            "is_holiday": is_holiday
         }
         future_rows.append(row)
         
@@ -219,11 +220,26 @@ def generate_forecasts(
     config: dict
 ) -> pd.DataFrame:
     """Inference loop."""
+    # Strict 12-feature list to match training (06_train_lgbm)
+    MODEL_FEATURES = [
+        'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
+        'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
+        'hour_of_day', 'day_of_week', 'month',
+        'is_weekend', 'is_holiday'
+    ]
+    
+    # Force alignment and log for debugging
+    X = features_df[MODEL_FEATURES].copy()
+    print(f"DEBUG: X shape: {X.shape}")
+    print(f"DEBUG: X columns: {X.columns.tolist()}")
+    logger.info(f"Model Input: {X.shape[1]} features. Columns: {list(X.columns)}")
+    
     if "lgbm" in model_name:
-        X = features_df[config["feature_columns"]]
+        print(f"DEBUG: Calling LGBM predict for {model_name} (Run: {run_id})")
         preds = np.clip(model.predict(X), a_min=0, a_max=None)
     else: # Prophet
-        p_df = features_df.reset_index().rename(columns={"timestamp": "ds", "temperature_c": "temperature_c"})
+        print(f"DEBUG: Calling Prophet predict for {model_name} (Run: {run_id})")
+        p_df = X.reset_index().rename(columns={"timestamp": "ds"})
         forecast = model.predict(p_df)
         preds = forecast["yhat"].clip(lower=0).values
         
@@ -321,15 +337,19 @@ for h in horizons:
     logger.info(f"Starting forecast for {h}h horizon...")
     model, ver, r_id = models_dict[h]
     
-    # Determine actual model name from the loaded model metadata
+    # Determine actual model name from the loaded model object type
     lgbm_name = f"energy_lgbm_{h}h"
     prophet_name = f"energy_prophet_{h}h"
     
-    try:
-        lgbm_versions = mlflow_client.get_latest_versions(lgbm_name, stages=["Production"])
-        actual_model_name = lgbm_name if lgbm_versions and lgbm_versions[0].run_id == r_id else prophet_name
-    except Exception:
+    # Check model type directly from the object (Fixes feature mismatch errors)
+    model_type_name = type(model).__name__
+    if "LGBM" in model_type_name or "LightGBM" in model_type_name:
+        actual_model_name = lgbm_name
+    elif "Prophet" in model_type_name:
         actual_model_name = prophet_name
+    else:
+        # Fallback: check if it has lgbm-specific methods
+        actual_model_name = lgbm_name if hasattr(model, 'booster_') else prophet_name
     
     feats = prepare_inference_features(spark, CONFIG, h, forecast_run_at)
     forecasts_df = generate_forecasts(
