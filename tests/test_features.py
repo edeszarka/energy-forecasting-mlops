@@ -23,7 +23,7 @@ from src.config import MIN_TRAINING_ROWS
 def make_hourly_df():
     """Fixture to create a mock hourly load DataFrame."""
     def _make(n_hours=200, start="2024-01-01", base_load=4000.0):
-        ts = pd.date_range(start=start, periods=n_hours, freq="H", tz="UTC")
+        ts = pd.date_range(start=start, periods=n_hours, freq="h", tz="UTC")
         # Add sinusoidal daily pattern
         hours = np.arange(n_hours)
         load = base_load + 500 * np.sin(2 * np.pi * hours / 24)
@@ -34,7 +34,7 @@ def make_hourly_df():
 def make_temp_df():
     """Fixture to create a mock hourly temperature DataFrame."""
     def _make(n_hours=200, start="2024-01-01"):
-        ts = pd.date_range(start=start, periods=n_hours, freq="H", tz="UTC")
+        ts = pd.date_range(start=start, periods=n_hours, freq="h", tz="UTC")
         temp = 10 + 5 * np.cos(2 * np.pi * np.arange(n_hours) / 24)
         return pd.DataFrame({
             "timestamp": ts, 
@@ -88,7 +88,8 @@ def test_lag_features_correct_shift(make_hourly_df):
     
     # Row 100 lag_24h should be value_mwh from row 76
     assert feat_df.iloc[100]["lag_24h"] == df.iloc[76]["value_mwh"]
-    assert feat_df.iloc[100]["lag_168h"] == df.iloc[100-168]["value_mwh"]
+    # Row 168 is the first row with a valid lag_168h
+    assert feat_df.iloc[168]["lag_168h"] == df.iloc[0]["value_mwh"]
 
 def test_lag_features_gap_detection(make_hourly_df):
     df = make_hourly_df(n_hours=200)
@@ -144,7 +145,7 @@ def test_build_feature_matrix_column_contract(make_hourly_df, make_temp_df):
 
 def test_build_feature_matrix_raises_on_insufficient_data():
     df = pd.DataFrame({
-        "timestamp": pd.date_range("2024-01-01", periods=10, freq="H", tz="UTC"),
+        "timestamp": pd.date_range("2024-01-01", periods=10, freq="h", tz="UTC"),
         "value_mwh": [4000.0] * 10
     })
     with pytest.raises(ValueError, match="Insufficient data"):
@@ -158,4 +159,5 @@ def test_training_serving_skew_guard(make_hourly_df, make_temp_df):
     df1 = build_feature_matrix(load_df, temp_df)
     df2 = build_feature_matrix(load_df, temp_df)
     
-    pd.testing.assert_frame_equal(df1, df2)
+    # Exclude feature_built_at as it will always differ
+    pd.testing.assert_frame_equal(df1.drop(columns=["feature_built_at"]), df2.drop(columns=["feature_built_at"]))

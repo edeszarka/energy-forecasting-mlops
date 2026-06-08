@@ -35,6 +35,8 @@ from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.types import *
 from delta.tables import DeltaTable
 
+from src.config import PATHS, CATALOG, SCHEMA
+
 # COMMAND ----------
 
 # SECTION 1 — SETUP AND CONFIG
@@ -43,18 +45,14 @@ from delta.tables import DeltaTable
 dbutils.widgets.text("force_backfill", "false")
 dbutils.widgets.text("horizon_hours", "both")
 
-# Unity Catalog Paths
-CATALOG = "workspace"
-SCHEMA = "energy_forecasting"
-
 try:
     pipeline_run_id = dbutils.notebook.entry_point.getDbutils().notebook().getContext().currentRunId().getOrElse(lambda: "manual")
 except:
     pipeline_run_id = "manual"
 
 CONFIG = {
-    "silver_table": f"{CATALOG}.{SCHEMA}.silver_features",
-    "forecast_table": f"{CATALOG}.{SCHEMA}.gold_forecasts",
+    "silver_table": PATHS.table_silver,
+    "forecast_table": PATHS.table_gold,
     "feature_columns": [
         'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
         'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',

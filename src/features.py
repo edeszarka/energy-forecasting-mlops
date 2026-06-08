@@ -115,7 +115,7 @@ def add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
     full_range = pd.date_range(
         start=df["timestamp"].min(),
         end=df["timestamp"].max(),
-        freq="H",
+        freq="h",
         tz="UTC"
     )
     

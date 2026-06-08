@@ -27,13 +27,15 @@ from mlflow.tracking import MlflowClient
 from pyspark.sql import functions as F
 from pyspark.sql.types import *
 
+from src.config import PATHS, CATALOG, SCHEMA
+
 # COMMAND ----------
 
 dbutils.widgets.text("mape_improvement_threshold", "0.01")
 THRESHOLD = float(dbutils.widgets.get("mape_improvement_threshold"))
 
 CONFIG = {
-    "eval_table": "workspace.energy_forecasting.model_evaluation"
+    "eval_table": PATHS.table_eval
 }
 
 # COMMAND ----------
@@ -92,8 +94,8 @@ def get_run_metrics(model_name: str, type_filter: str):
 # COMMAND ----------
 
 # Main execution
-spark.sql("USE CATALOG workspace")
-spark.sql("CREATE DATABASE IF NOT EXISTS energy_forecasting")
+spark.sql(f"USE CATALOG {CATALOG}")
+spark.sql(f"CREATE DATABASE IF NOT EXISTS {SCHEMA}")
 
 model_names = ["energy_prophet_24h", "energy_prophet_168h", "energy_lgbm_24h", "energy_lgbm_168h"]
 eval_rows = []

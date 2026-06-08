@@ -114,13 +114,15 @@ def test_fetch_temperature_happy_path(openmeteo_client):
     df = openmeteo_client.fetch_temperature(date(2024, 1, 1), date(2024, 1, 1))
     
     assert len(df) == 2
-    assert df["timestamp"].dt.tz.zone == "UTC"
+    # Check if timezone is UTC
+    assert str(df["timestamp"].dt.tz) in ["UTC", "datetime.timezone.utc", "UTC0"]
     assert df.iloc[0]["temperature_c"] == 5.0
 
 def test_fetch_temperature_fallback_imputation(openmeteo_client):
     # Create DF with NaNs
+    # Note: 'h' is the new standard for hourly frequency in pandas/Python 3.14
     df = pd.DataFrame({
-        "timestamp": pd.date_range("2024-01-01", periods=10, freq="H", tz="UTC"),
+        "timestamp": pd.date_range("2024-01-01", periods=10, freq="h", tz="UTC"),
         "temperature_c": [10.0, 11.0, None, 13.0, None, 15.0, 16.0, 17.0, 18.0, 19.0]
     })
     

@@ -156,7 +156,7 @@ bronze_load_df = spark.read.table(PATHS.table_bronze) \
     .filter(F.col("country") == ENTSO_E_ZONE) \
     .orderBy("timestamp")
 
-bronze_temp_df = spark.read.table(f"{CATALOG}.{SCHEMA}.bronze_temperature") \
+bronze_temp_df = spark.read.table(PATHS.table_bronze_temp) \
     .filter(F.col("timestamp").between(window_start, window_end)) \
     .orderBy("timestamp")
 
@@ -248,7 +248,7 @@ silver_spark_df = spark.createDataFrame(feature_pd, schema=SILVER_SCHEMA)
 
 if not dry_run:
     DeltaTable.createIfNotExists(spark) \
-        .tableName(f"{CATALOG}.{SCHEMA}.silver_features") \
+        .tableName(PATHS.table_silver) \
         .addColumns(SILVER_SCHEMA) \
         .partitionedBy("country") \
         .property("delta.autoOptimize.optimizeWrite", "true") \
@@ -263,7 +263,7 @@ if not dry_run:
 # Idempotently updates the silver table.
 
 if not dry_run:
-    delta_silver = DeltaTable.forName(spark, f"{CATALOG}.{SCHEMA}.silver_features")
+    delta_silver = DeltaTable.forName(spark, PATHS.table_silver)
     
     delta_silver.alias("target").merge(
         silver_spark_df.alias("source"),

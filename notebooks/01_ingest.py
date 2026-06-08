@@ -86,13 +86,13 @@ from pyspark.sql.utils import AnalysisException
 from delta.tables import DeltaTable
 
 from src.config import (
-    PATHS, ENTSO_E_ZONE,
+    PATHS, ENTSO_E_ZONE, CATALOG, SCHEMA,
     ENV_DATABRICKS_HOST, ENV_DATABRICKS_TOKEN
 )
 
 # Setup catalog and schema
-spark.sql("USE CATALOG workspace")
-spark.sql("CREATE SCHEMA IF NOT EXISTS workspace.energy_forecasting")
+spark.sql(f"USE CATALOG {CATALOG}")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
 spark.conf.set("spark.sql.session.timeZone", "UTC")
 
 logger = logging.getLogger("01_ingest")
@@ -135,8 +135,8 @@ TEMPERATURE_TABLE_SCHEMA = StructType(TEMPERATURE_BRONZE_SCHEMA.fields + [
 # Cell 5: Resolve file paths to ingest
 # Identifies which JSON files exist in the Volume for the given lookback window.
 
-VOLUME_LOAD_PATH = "/Volumes/workspace/energy_forecasting/data/raw_ingestion/load"
-VOLUME_TEMP_PATH = "/Volumes/workspace/energy_forecasting/data/raw_ingestion/temperature"
+VOLUME_LOAD_PATH = PATHS.volume_raw_load
+VOLUME_TEMP_PATH = PATHS.volume_raw_temp
 
 found_load_files = []
 missing_load_files = []
@@ -229,7 +229,7 @@ temp_processed_df = temp_raw_df.dropDuplicates(["timestamp"]) \
 if not dry_run:
     # Load Table
     DeltaTable.createIfNotExists(spark) \
-        .tableName("workspace.energy_forecasting.bronze_load") \
+        .tableName(PATHS.table_bronze) \
         .addColumns(BRONZE_TABLE_SCHEMA) \
         .partitionedBy("country") \
         .property("delta.autoOptimize.optimizeWrite", "true") \
@@ -239,7 +239,7 @@ if not dry_run:
     
     # Temperature Table
     DeltaTable.createIfNotExists(spark) \
-        .tableName("workspace.energy_forecasting.bronze_temperature") \
+        .tableName(PATHS.table_bronze_temp) \
         .addColumns(TEMPERATURE_TABLE_SCHEMA) \
         .property("delta.autoOptimize.optimizeWrite", "true") \
         .property("delta.autoOptimize.autoCompact", "true") \
@@ -252,7 +252,7 @@ if not dry_run:
 # Idempotently updates the bronze load table.
 
 if not dry_run:
-    delta_load = DeltaTable.forName(spark, "workspace.energy_forecasting.bronze_load")
+    delta_load = DeltaTable.forName(spark, PATHS.table_bronze)
     
     delta_load.alias("target").merge(
         load_processed_df.alias("source"),
@@ -277,7 +277,7 @@ if not dry_run:
 # Idempotently updates the bronze temperature table.
 
 if not dry_run and not temp_processed_df.isEmpty():
-    delta_temp = DeltaTable.forName(spark, "workspace.energy_forecasting.bronze_temperature")
+    delta_temp = DeltaTable.forName(spark, PATHS.table_bronze_temp)
     
     delta_temp.alias("target").merge(
         temp_processed_df.alias("source"),
@@ -321,7 +321,7 @@ if not dry_run:
         .write.format("delta") \
         .mode("append") \
         .partitionBy("date") \
-        .saveAsTable("workspace.energy_forecasting.ingestion_log")
+        .saveAsTable(PATHS.table_ingestion_log)
 
 # COMMAND ----------
 
@@ -329,8 +329,8 @@ if not dry_run:
 # Moves successfully ingested files to an archive folder to prevent reprocessing.
 
 if not dry_run:
-    ARCHIVE_LOAD_PATH = "/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/load"
-    ARCHIVE_TEMP_PATH = "/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/temperature"
+    ARCHIVE_LOAD_PATH = PATHS.volume_archive_load
+    ARCHIVE_TEMP_PATH = PATHS.volume_archive_temp
     
     dbutils.fs.mkdirs(ARCHIVE_LOAD_PATH)
     dbutils.fs.mkdirs(ARCHIVE_TEMP_PATH)

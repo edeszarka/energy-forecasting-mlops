@@ -42,6 +42,8 @@ from pyspark.sql.types import (
     StructType, StructField, StringType, TimestampType, DoubleType, BooleanType
 )
 
+from src.config import PATHS, CATALOG, SCHEMA, RETRAIN_FLAG_PATH
+
 # COMMAND ----------
 
 # SECTION 1 — SETUP AND CONFIG
@@ -51,15 +53,10 @@ dbutils.widgets.text("mape_improvement_threshold", "0.01")
 dbutils.widgets.text("dry_run", "false")
 dbutils.widgets.text("force_promote", "false")
 
-# Infrastructure Overrides from GEMINI.md
-CATALOG = "workspace"
-SCHEMA = "energy_forecasting"
-VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/data"
-
 CONFIG = {
-    "eval_table": f"{CATALOG}.{SCHEMA}.model_evaluation",
-    "promotion_log_table": f"{CATALOG}.{SCHEMA}.promotion_log",
-    "flag_path": f"{VOLUME_PATH}/flags/retrain_requested.flag",
+    "eval_table": PATHS.table_eval,
+    "promotion_log_table": PATHS.table_promotion,
+    "flag_path": RETRAIN_FLAG_PATH,
     "model_names": ["energy_lgbm_24h", "energy_lgbm_168h", "energy_prophet_24h", "energy_prophet_168h"],
     "mape_threshold": float(dbutils.widgets.get("mape_improvement_threshold")),
     "dry_run": dbutils.widgets.get("dry_run").lower() == "true",

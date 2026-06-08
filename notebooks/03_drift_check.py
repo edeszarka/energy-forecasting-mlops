@@ -37,6 +37,8 @@ from evidently.report import Report
 from evidently.metric_presets import DataDriftPreset
 from evidently.metrics import ColumnDriftMetric
 
+from src.config import PATHS, CATALOG, SCHEMA, RETRAIN_FLAG_PATH
+
 # COMMAND ----------
 
 # SECTION 1 — SETUP AND CONFIG
@@ -48,18 +50,12 @@ dbutils.widgets.text("consecutive_hours_threshold", "3")
 dbutils.widgets.text("current_window_days", "7")
 dbutils.widgets.text("min_rows_for_drift", "100")
 
-# Unity Catalog Paths
-CATALOG = "workspace"
-SCHEMA = "energy_forecasting"
-VOLUME_NAME = "data" # Assumed volume for files
-VOLUME_ROOT = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME_NAME}"
-
 CONFIG = {
-    "silver_table": f"{CATALOG}.{SCHEMA}.silver_features",
-    "forecast_table": f"{CATALOG}.{SCHEMA}.gold_forecasts",
-    "drift_table": f"{CATALOG}.{SCHEMA}.drift_control",
-    "report_base_path": f"{VOLUME_ROOT}/drift_reports",
-    "flag_path": f"{VOLUME_ROOT}/flags/retrain_requested.flag",
+    "silver_table": PATHS.table_silver,
+    "forecast_table": PATHS.table_gold,
+    "drift_table": PATHS.table_drift,
+    "report_base_path": PATHS.volume_reports,
+    "flag_path": RETRAIN_FLAG_PATH,
     "drift_threshold": float(dbutils.widgets.get("drift_threshold")),
     "consecutive_hours_threshold": int(dbutils.widgets.get("consecutive_hours_threshold")),
     "current_window_days": int(dbutils.widgets.get("current_window_days")),

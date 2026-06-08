@@ -33,6 +33,8 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from pyspark.sql import functions as F
 
+from src.config import PATHS, CATALOG, SCHEMA
+
 # Fix for MLflow model registration in Databricks Unity Catalog
 os.environ['MLFLOW_USE_DATABRICKS_SDK_MODEL_ARTIFACTS_REPO_FOR_UC'] = 'True'
 
@@ -42,7 +44,7 @@ dbutils.widgets.text("test_days", "30")
 dbutils.widgets.text("min_train_rows", "2000")
 
 CONFIG = {
-    "silver_table": "workspace.energy_forecasting.silver_features",
+    "silver_table": PATHS.table_silver,
     "test_days": int(dbutils.widgets.get("test_days")),
     "min_train_rows": int(dbutils.widgets.get("min_train_rows")),
 }
@@ -128,7 +130,7 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
 # COMMAND ----------
 
 # Main execution
-spark.sql("USE CATALOG workspace")
+spark.sql(f"USE CATALOG {CATALOG}")
 pdf = spark.read.table(CONFIG["silver_table"]).toPandas()
 pdf['timestamp'] = pd.to_datetime(pdf['timestamp'])
 
@@ -143,5 +145,3 @@ with mlflow.start_run(run_name=parent_run_name):
 print("\nLightGBM Training Summary:")
 print(pd.DataFrame(results).to_string(index=False))
 dbutils.notebook.exit("SUCCESS")
-
-# FIX APPLIED: Added training_data_start and training_data_end MLflow tags for drift reference window definition.
