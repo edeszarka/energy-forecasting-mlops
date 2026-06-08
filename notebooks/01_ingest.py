@@ -349,7 +349,35 @@ if not dry_run:
 
 # COMMAND ----------
 
-# Cell 12: Notebook exit
+# Cell 12: Automated Backfilling Detection
+# Checks for gaps in the bronze_load table and requests backfills if needed.
+
+detected_gaps = []
+
+if not dry_run:
+    # Look for timestamps with null values in the last 30 days
+    # We ignore the very latest hours as they might be arriving now
+    gap_check_end = run_date - timedelta(hours=3)
+    gap_check_start = run_date - timedelta(days=30)
+    
+    gaps_df = spark.read.table(PATHS.table_bronze) \
+        .filter(F.col("timestamp").between(gap_check_start, gap_check_end)) \
+        .filter(F.col("country") == ENTSO_E_ZONE) \
+        .filter(F.col("value_mwh").isNull()) \
+        .select("timestamp") \
+        .orderBy("timestamp") \
+        .collect()
+    
+    if gaps_df:
+        detected_gaps = [row.timestamp.isoformat() for row in gaps_df]
+        logger.warning(f"Detected {len(detected_gaps)} gaps in bronze_load. First gap: {detected_gaps[0]}")
+        
+        # NOTE: In a full implementation, we could trigger a GHA workflow via API here.
+        # For now, we log it and include it in the notebook exit for monitoring.
+
+# COMMAND ----------
+
+# Cell 13: Notebook exit
 # Terminates with a summary status.
 
 dbutils.notebook.exit(json.dumps({
@@ -357,6 +385,8 @@ dbutils.notebook.exit(json.dumps({
     "files_found": len(found_load_files),
     "files_missing": len(missing_load_files),
     "rows_ingested": int(load_count),
+    "gaps_detected_count": len(detected_gaps),
+    "first_gap": detected_gaps[0] if detected_gaps else None,
     "dry_run": dry_run,
     "run_id": run_id,
     "run_date": run_date.isoformat(),
