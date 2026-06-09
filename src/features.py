@@ -67,7 +67,7 @@ def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
     # Hungarian Holidays (Moveable)
     min_year = local_ts.dt.year.min()
     max_year = local_ts.dt.year.max()
-    hu_holidays = holidays.Hungary(years=range(min_year, max_year + 1))
+    hu_holidays = holidays.country_holidays("HU", years=range(min_year, max_year + 1))
     
     # Fixed Holidays from config
     def check_is_holiday(row: pd.Timestamp) -> bool:

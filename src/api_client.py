@@ -128,6 +128,8 @@ class EntsoEClient:
         try:
             response.raise_for_status()
         except requests.HTTPError as e:
+            # self.api_key is guaranteed to be a string by __init__
+            assert self.api_key is not None
             msg = str(e).replace(self.api_key, "***")
             raise requests.HTTPError(msg, response=response) from e
 
