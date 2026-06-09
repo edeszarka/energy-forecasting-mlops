@@ -25,22 +25,26 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-import logging
-import json
 import hashlib
-import os
-from datetime import datetime, UTC
+import json
+import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
 from mlflow.tracking import MlflowClient
 from pyspark.sql import functions as F
-from pyspark.sql.window import Window
 from pyspark.sql.types import (
-    StructType, StructField, StringType, TimestampType, DoubleType, BooleanType
+    BooleanType,
+    DoubleType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
 )
+from pyspark.sql.window import Window
 
-from src.config import PATHS, CATALOG, RETRAIN_FLAG_PATH
+from src.config import CATALOG, PATHS, RETRAIN_FLAG_PATH
 
 # COMMAND ----------
 

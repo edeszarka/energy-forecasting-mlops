@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from src.config import ENTSO_E_MAX_RANGE_DAYS
 
+
 def calculate_chunks(start: datetime, end: datetime, max_days: int):
     """Extracted chunking logic for testing."""
     chunks = []

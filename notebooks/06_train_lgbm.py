@@ -21,19 +21,18 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 import logging
-import json
 import os
 from datetime import UTC, datetime
-import pandas as pd
-import numpy as np
-import mlflow
-import lightgbm as lgb
-import shap
-import matplotlib.pyplot as plt
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-from pyspark.sql import functions as F
 
-from src.config import PATHS, CATALOG, SCHEMA
+import lightgbm as lgb
+import matplotlib.pyplot as plt
+import mlflow
+import numpy as np
+import pandas as pd
+import shap
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+from src.config import CATALOG, PATHS
 
 # Fix for MLflow model registration in Databricks Unity Catalog
 os.environ['MLFLOW_USE_DATABRICKS_SDK_MODEL_ARTIFACTS_REPO_FOR_UC'] = 'True'
@@ -96,7 +95,8 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
         y_pred = model.predict(X_test)
         mae, rmse, mape = mean_absolute_error(y_test, y_pred), np.sqrt(mean_squared_error(y_test, y_pred)), calculate_mape(y_test, y_pred)
         
-        mlflow.log_params(params); mlflow.log_param("best_iteration", model.best_iteration_)
+        mlflow.log_params(params)
+        mlflow.log_param("best_iteration", model.best_iteration_)
         mlflow.log_metrics({"mae": mae, "rmse": rmse, "mape": mape})
         
         # Reference Window Metadata
@@ -111,10 +111,15 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
             sample_idx = np.random.choice(X_test.index, min(500, len(X_test)), replace=False)
             explainer = shap.TreeExplainer(model)
             shap_values = explainer.shap_values(X_test.loc[sample_idx])
-            plt.figure(figsize=(10, 6)); shap.summary_plot(shap_values, X_test.loc[sample_idx], show=False)
-            plt.tight_layout(); plt.savefig("shap_summary.png"); mlflow.log_artifact("shap_summary.png"); plt.close()
+            plt.figure(figsize=(10, 6))
+            shap.summary_plot(shap_values, X_test.loc[sample_idx], show=False)
+            plt.tight_layout()
+            plt.savefig("shap_summary.png")
+            mlflow.log_artifact("shap_summary.png")
+            plt.close()
         except Exception as e:
-            logger.warning(f"SHAP failed: {e}"); mlflow.set_tag("shap_failed", True)
+            logger.warning(f"SHAP failed: {e}")
+            mlflow.set_tag("shap_failed", True)
         # Log model
         mlflow.lightgbm.log_model(model, artifact_path="model")
         

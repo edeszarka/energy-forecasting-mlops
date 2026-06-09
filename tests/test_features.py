@@ -16,6 +16,7 @@ from src.features import (
     get_feature_columns,
 )
 
+
 @pytest.fixture
 def make_hourly_df():
     """Fixture to create a mock hourly load DataFrame."""

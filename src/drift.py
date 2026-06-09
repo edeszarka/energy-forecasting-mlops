@@ -8,6 +8,7 @@ and calculate performance degradation metrics.
 import numpy as np
 import pandas as pd
 
+
 def extract_drift_results(report_dict: dict) -> dict:
     """
     Extracts structured results from an Evidently report.as_dict() output.

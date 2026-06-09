@@ -22,13 +22,14 @@ dbutils.library.restartPython()
 
 import logging
 import os
-from datetime import UTC, datetime, timedelta
-import pandas as pd
-import numpy as np
+from datetime import UTC, datetime
+
+import cmdstanpy
 import mlflow
+import numpy as np
+import pandas as pd
 from mlflow.models import infer_signature
 from prophet import Prophet
-import cmdstanpy
 
 # Fix for MLflow model registration in Databricks Unity Catalog
 os.environ['MLFLOW_USE_DATABRICKS_SDK_MODEL_ARTIFACTS_REPO_FOR_UC'] = 'True'
@@ -40,7 +41,7 @@ if tuple(int(x) for x in cmdstanpy.__version__.split(".")[:2]) >= (1, 2):
     )
 from pyspark.sql import functions as F
 
-from src.config import PATHS, CATALOG, SCHEMA
+from src.config import CATALOG, PATHS
 
 # COMMAND ----------
 

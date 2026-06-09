@@ -32,8 +32,8 @@ dbutils.library.restartPython()
 # Cell 1: Environment Setup
 # Adds the project root to sys.path to allow importing from the 'src' directory.
 
-import sys
 import os
+import sys
 from pathlib import Path
 
 # In Databricks, the working directory is the folder containing the notebook.
@@ -47,8 +47,8 @@ if root_path not in sys.path:
 # Cell 2: Widgets
 # Handles runtime parameters and resolves the execution date.
 
-from datetime import UTC, datetime, timedelta
 import logging
+from datetime import UTC, datetime, timedelta
 
 try:
     dbutils.widgets.text("run_date", "")
@@ -78,16 +78,21 @@ print(f"Lookback files: {lookback_files}")
 
 import json
 from pathlib import PurePosixPath
+
+from delta.tables import DeltaTable
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
-    StructType, StructField, TimestampType, DoubleType, StringType, BooleanType, IntegerType
+    BooleanType,
+    DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
 )
 from pyspark.sql.utils import AnalysisException
-from delta.tables import DeltaTable
 
-from src.config import (
-    PATHS, ENTSO_E_ZONE, CATALOG, SCHEMA
-)
+from src.config import CATALOG, ENTSO_E_ZONE, PATHS, SCHEMA
 
 # Setup catalog and schema
 spark.sql(f"USE CATALOG {CATALOG}")
@@ -203,7 +208,7 @@ print(f"Loaded {load_raw_df.count()} load rows and {temp_raw_df.count()} tempera
 try:
     context = json.loads(dbutils.notebook.entry_point.getDbutils().notebook().getContext().toJson())
     run_id = str(context.get("tags", {}).get("runId", "manual"))
-except:
+except Exception:
     run_id = "manual"
 
 # Validate and augment Load
@@ -337,13 +342,13 @@ if not dry_run:
     for f in found_load_files:
         try:
             dbutils.fs.mv(f, f"{ARCHIVE_LOAD_PATH}/{PurePosixPath(f).name}")
-        except:
+        except Exception:
             logger.warning(f"Failed to archive load file: {f}")
             
     for f in found_temp_files:
         try:
             dbutils.fs.mv(f, f"{ARCHIVE_TEMP_PATH}/{PurePosixPath(f).name}")
-        except:
+        except Exception:
             logger.warning(f"Failed to archive temperature file: {f}")
 
 # COMMAND ----------

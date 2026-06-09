@@ -20,25 +20,29 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-import logging
 import json
+import logging
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
-import mlflow
+from evidently.metric_presets import DataDriftPreset
+from evidently.metrics import ColumnDriftMetric
+from evidently.report import Report
 from mlflow.tracking import MlflowClient
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
-    StructType, StructField, TimestampType, DoubleType, StringType, BooleanType, IntegerType
+    BooleanType,
+    DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
 )
 
-from evidently.report import Report
-from evidently.metric_presets import DataDriftPreset
-from evidently.metrics import ColumnDriftMetric
-
-from src.config import PATHS, CATALOG, SCHEMA, RETRAIN_FLAG_PATH
+from src.config import PATHS, RETRAIN_FLAG_PATH, SCHEMA
 
 # COMMAND ----------
 
@@ -307,7 +311,7 @@ def should_trigger_retrain(
     # Check cooldown (24h)
     try:
         last_retrain = spark.table(config["drift_table"]) \
-            .filter(F.col("retrain_triggered") == True) \
+            .filter(F.col("retrain_triggered")) \
             .orderBy(F.col("check_timestamp").desc()) \
             .limit(1) \
             .select("check_timestamp") \

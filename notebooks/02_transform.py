@@ -28,8 +28,8 @@ dbutils.library.restartPython()
 # Cell 1: Environment Setup
 # Adds the project root to sys.path to allow importing from the 'src' directory.
 
-import sys
 import os
+import sys
 from pathlib import Path
 
 # In Databricks, the working directory is the folder containing the notebook.
@@ -43,8 +43,8 @@ if root_path not in sys.path:
 # Cell 2: Widgets
 # Handles runtime parameters for the transformation process.
 
-from datetime import UTC, datetime, timedelta
 import logging
+from datetime import UTC, datetime, timedelta
 
 try:
     dbutils.widgets.text("lookback_hours", "168")  # 1 week
@@ -75,16 +75,22 @@ print(f"Force full rebuild: {force_full_rebuild}")
 # Standard imports and initialization of the Spark session context.
 
 import json
+
 import pandas as pd
-import numpy as np
+from delta.tables import DeltaTable
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
-    StructType, StructField, TimestampType, DoubleType, StringType, BooleanType, IntegerType
+    BooleanType,
+    DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
 )
-from delta.tables import DeltaTable
 
+from src.config import CATALOG, ENTSO_E_ZONE, LAG_HOURS, MIN_TRAINING_ROWS, PATHS
 from src.features import build_feature_matrix, get_feature_columns
-from src.config import PATHS, CATALOG, SCHEMA, MIN_TRAINING_ROWS, LAG_HOURS, ENTSO_E_ZONE
 
 # Ensure UTC consistency
 spark.conf.set("spark.sql.session.timeZone", "UTC")
@@ -136,7 +142,7 @@ SILVER_SCHEMA = StructType([
 try:
     context = json.loads(dbutils.notebook.entry_point.getDbutils().notebook().getContext().toJson())
     run_id = str(context.get("tags", {}).get("runId", "manual"))
-except:
+except Exception:
     run_id = "manual"
 
 # We extend the window by max(LAG_HOURS) to ensure we have history for the lags of the first row
