@@ -21,14 +21,12 @@ Features defined:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Final
 
 import holidays
 import numpy as np
 import pandas as pd
 
-from src.config import FIXED_HOLIDAYS, LAG_HOURS, MIN_TRAINING_ROWS, ROLLING_WINDOW_DAYS
+from src.config import FIXED_HOLIDAYS, LAG_HOURS, MIN_TRAINING_ROWS
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +67,7 @@ def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
     # Hungarian Holidays (Moveable)
     min_year = local_ts.dt.year.min()
     max_year = local_ts.dt.year.max()
-    hu_holidays = holidays.Hungary(years=range(min_year, max_year + 1))
+    hu_holidays = holidays.country_holidays("HU", years=range(min_year, max_year + 1))
     
     # Fixed Holidays from config
     def check_is_holiday(row: pd.Timestamp) -> bool:
@@ -85,6 +83,10 @@ def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
     # Holiday Eve (Day before holiday or weekend)
     # We use shift(-1) on the sorted local timestamps to see if tomorrow is a holiday
     df_sorted = df.sort_values("timestamp")
+    
+    # Fix FutureWarning: set option to opt-in to future behavior
+    pd.set_option("future.no_silent_downcasting", True)
+    
     tomorrow_is_holiday = df_sorted["is_holiday"].shift(-1).fillna(False)
     tomorrow_is_weekend = (df_sorted["day_of_week"].shift(-1) >= 5).fillna(False)
     df["is_holiday_eve"] = tomorrow_is_holiday | tomorrow_is_weekend
@@ -115,7 +117,7 @@ def add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
     full_range = pd.date_range(
         start=df["timestamp"].min(),
         end=df["timestamp"].max(),
-        freq="H",
+        freq="h",
         tz="UTC"
     )
     
@@ -161,56 +163,67 @@ def add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
     
     return df
 
-def _fill_missing_temperature(df: pd.DataFrame) -> pd.DataFrame:
+def _fill_missing_weather(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Private helper to impute missing weather data.
+    Private helper to impute missing weather data for all columns.
     """
     df = df.copy()
     
+    weather_cols = ["temperature_c", "humidity_pct", "cloud_cover_pct"]
+    
     # Track which rows were missing before filling
+    missing_before = df[weather_cols].isna()
     df["temp_missing"] = df["temperature_c"].isna()
     
-    # Step 1: Forward-fill short gaps (up to 3h)
-    df["temperature_c"] = df["temperature_c"].ffill(limit=3)
+    for col in weather_cols:
+        if col not in df.columns:
+            continue
+        # Step 1: Forward-fill short gaps (up to 3h)
+        df[col] = df[col].ffill(limit=3)
+        # Step 2: Backward-fill short gaps (up to 3h)
+        df[col] = df[col].bfill(limit=3)
+        # Step 3: 72h rolling mean for remaining NaN
+        df[col] = df[col].fillna(
+            df[col].rolling(window=72, min_periods=1, center=True).mean()
+        )
     
-    # Step 2: Backward-fill short gaps (up to 3h)
-    df["temperature_c"] = df["temperature_c"].bfill(limit=3)
-    
-    # Step 3: 72h rolling mean for remaining NaN
-    df["temperature_c"] = df["temperature_c"].fillna(
-        df["temperature_c"].rolling(window=72, min_periods=1, center=True).mean()
-    )
-    
-    # Update is_temp_imputed flag
-    df["is_temp_imputed"] = df["is_temp_imputed"] | (df["temp_missing"] & df["temperature_c"].notna())
+    # Update is_weather_imputed flag
+    if "is_weather_imputed" not in df.columns:
+        df["is_weather_imputed"] = False
+        
+    # Mark as imputed if any weather column was missing but is now filled
+    was_filled = (missing_before & df[weather_cols].notna()).any(axis=1)
+    df["is_weather_imputed"] = df["is_weather_imputed"] | was_filled
     
     return df
 
-def add_temperature_features(
+def add_weather_features(
     df: pd.DataFrame,
-    temp_df: pd.DataFrame,
+    weather_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Merges and processes temperature features.
+    Merges and processes weather features (temperature, humidity, cloud cover).
     """
-    if temp_df.empty:
-        logger.warning("Temperature DataFrame is empty. Features will be null.")
+    if weather_df.empty:
+        logger.warning("Weather DataFrame is empty. Features will be null.")
         df["temperature_c"] = np.nan
+        df["humidity_pct"] = np.nan
+        df["cloud_cover_pct"] = np.nan
         df["temperature_lag_24h"] = np.nan
-        df["is_temp_imputed"] = False
+        df["is_weather_imputed"] = False
         df["temp_missing"] = True
         return df
 
-    # Merge temperature data
+    # Merge weather data
     df = pd.merge(
         df, 
-        temp_df[["timestamp", "temperature_c", "is_temp_imputed"]], 
+        weather_df[["timestamp", "temperature_c", "humidity_pct", "cloud_cover_pct", "is_weather_imputed"]], 
         on="timestamp", 
         how="left"
     )
     
-    # Impute missing temperature values
-    df = _fill_missing_temperature(df)
+    # Impute missing values
+    df = _fill_missing_weather(df)
     
     # Add temperature lag
     df = df.sort_values("timestamp")
@@ -220,14 +233,14 @@ def add_temperature_features(
 
 def build_feature_matrix(
     load_df: pd.DataFrame,
-    temp_df: pd.DataFrame,
+    weather_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """
     Orchestrates the creation of the full feature matrix.
     
     Args:
         load_df: Raw load data.
-        temp_df: Raw temperature data.
+        weather_df: Raw weather data.
         
     Returns:
         Complete feature matrix.
@@ -250,7 +263,7 @@ def build_feature_matrix(
     df = add_calendar_features(load_df)
     df = add_lag_features(df)
     df = add_rolling_features(df)
-    df = add_temperature_features(df, temp_df)
+    df = add_weather_features(df, weather_df)
     
     # Final cleanup
     df = df.sort_values("timestamp").reset_index(drop=True)
@@ -267,5 +280,5 @@ def get_feature_columns() -> list[str]:
         "is_weekend", "is_holiday", "is_holiday_eve", "days_since_epoch",
         "lag_24h", "lag_48h", "lag_168h",
         "rolling_7d_mean", "rolling_7d_std", "rolling_24h_mean",
-        "temperature_c", "temperature_lag_24h",
+        "temperature_c", "temperature_lag_24h", "humidity_pct", "cloud_cover_pct",
     ]

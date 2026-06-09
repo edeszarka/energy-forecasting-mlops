@@ -28,8 +28,8 @@ dbutils.library.restartPython()
 # Cell 1: Environment Setup
 # Adds the project root to sys.path to allow importing from the 'src' directory.
 
-import sys
 import os
+import sys
 from pathlib import Path
 
 # In Databricks, the working directory is the folder containing the notebook.
@@ -43,8 +43,8 @@ if root_path not in sys.path:
 # Cell 2: Widgets
 # Handles runtime parameters for the transformation process.
 
-from datetime import datetime, timezone, timedelta
 import logging
+from datetime import UTC, datetime, timedelta
 
 try:
     dbutils.widgets.text("lookback_hours", "168")  # 1 week
@@ -60,7 +60,7 @@ dry_run = dbutils.widgets.get("dry_run").lower() == "true"
 force_full_rebuild = dbutils.widgets.get("force_full_rebuild").lower() == "true"
 
 if not run_date_raw:
-    run_date = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    run_date = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
 else:
     run_date = datetime.fromisoformat(run_date_raw.replace("Z", "+00:00"))
 
@@ -75,16 +75,22 @@ print(f"Force full rebuild: {force_full_rebuild}")
 # Standard imports and initialization of the Spark session context.
 
 import json
+
 import pandas as pd
-import numpy as np
+from delta.tables import DeltaTable
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
-    StructType, StructField, TimestampType, DoubleType, StringType, BooleanType, IntegerType
+    BooleanType,
+    DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
 )
-from delta.tables import DeltaTable
 
+from src.config import CATALOG, ENTSO_E_ZONE, LAG_HOURS, MIN_TRAINING_ROWS, PATHS
 from src.features import build_feature_matrix, get_feature_columns
-from src.config import PATHS, CATALOG, SCHEMA, MIN_TRAINING_ROWS, LAG_HOURS, ENTSO_E_ZONE
 
 # Ensure UTC consistency
 spark.conf.set("spark.sql.session.timeZone", "UTC")
@@ -136,7 +142,7 @@ SILVER_SCHEMA = StructType([
 try:
     context = json.loads(dbutils.notebook.entry_point.getDbutils().notebook().getContext().toJson())
     run_id = str(context.get("tags", {}).get("runId", "manual"))
-except:
+except Exception:
     run_id = "manual"
 
 # We extend the window by max(LAG_HOURS) to ensure we have history for the lags of the first row
@@ -156,7 +162,7 @@ bronze_load_df = spark.read.table(PATHS.table_bronze) \
     .filter(F.col("country") == ENTSO_E_ZONE) \
     .orderBy("timestamp")
 
-bronze_temp_df = spark.read.table(f"{CATALOG}.{SCHEMA}.bronze_temperature") \
+bronze_temp_df = spark.read.table(PATHS.table_bronze_temp) \
     .filter(F.col("timestamp").between(window_start, window_end)) \
     .orderBy("timestamp")
 
@@ -248,7 +254,7 @@ silver_spark_df = spark.createDataFrame(feature_pd, schema=SILVER_SCHEMA)
 
 if not dry_run:
     DeltaTable.createIfNotExists(spark) \
-        .tableName(f"{CATALOG}.{SCHEMA}.silver_features") \
+        .tableName(PATHS.table_silver) \
         .addColumns(SILVER_SCHEMA) \
         .partitionedBy("country") \
         .property("delta.autoOptimize.optimizeWrite", "true") \
@@ -263,7 +269,7 @@ if not dry_run:
 # Idempotently updates the silver table.
 
 if not dry_run:
-    delta_silver = DeltaTable.forName(spark, f"{CATALOG}.{SCHEMA}.silver_features")
+    delta_silver = DeltaTable.forName(spark, PATHS.table_silver)
     
     delta_silver.alias("target").merge(
         silver_spark_df.alias("source"),

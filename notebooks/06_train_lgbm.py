@@ -21,17 +21,18 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 import logging
-import json
 import os
-from datetime import datetime, timezone
-import pandas as pd
-import numpy as np
-import mlflow
+from datetime import UTC, datetime
+
 import lightgbm as lgb
-import shap
 import matplotlib.pyplot as plt
+import mlflow
+import numpy as np
+import pandas as pd
+import shap
 from sklearn.metrics import mean_absolute_error, mean_squared_error
-from pyspark.sql import functions as F
+
+from src.config import CATALOG, PATHS
 
 # Fix for MLflow model registration in Databricks Unity Catalog
 os.environ['MLFLOW_USE_DATABRICKS_SDK_MODEL_ARTIFACTS_REPO_FOR_UC'] = 'True'
@@ -42,7 +43,7 @@ dbutils.widgets.text("test_days", "30")
 dbutils.widgets.text("min_train_rows", "2000")
 
 CONFIG = {
-    "silver_table": "workspace.energy_forecasting.silver_features",
+    "silver_table": PATHS.table_silver,
     "test_days": int(dbutils.widgets.get("test_days")),
     "min_train_rows": int(dbutils.widgets.get("min_train_rows")),
 }
@@ -94,7 +95,8 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
         y_pred = model.predict(X_test)
         mae, rmse, mape = mean_absolute_error(y_test, y_pred), np.sqrt(mean_squared_error(y_test, y_pred)), calculate_mape(y_test, y_pred)
         
-        mlflow.log_params(params); mlflow.log_param("best_iteration", model.best_iteration_)
+        mlflow.log_params(params)
+        mlflow.log_param("best_iteration", model.best_iteration_)
         mlflow.log_metrics({"mae": mae, "rmse": rmse, "mape": mape})
         
         # Reference Window Metadata
@@ -109,10 +111,15 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
             sample_idx = np.random.choice(X_test.index, min(500, len(X_test)), replace=False)
             explainer = shap.TreeExplainer(model)
             shap_values = explainer.shap_values(X_test.loc[sample_idx])
-            plt.figure(figsize=(10, 6)); shap.summary_plot(shap_values, X_test.loc[sample_idx], show=False)
-            plt.tight_layout(); plt.savefig("shap_summary.png"); mlflow.log_artifact("shap_summary.png"); plt.close()
+            plt.figure(figsize=(10, 6))
+            shap.summary_plot(shap_values, X_test.loc[sample_idx], show=False)
+            plt.tight_layout()
+            plt.savefig("shap_summary.png")
+            mlflow.log_artifact("shap_summary.png")
+            plt.close()
         except Exception as e:
-            logger.warning(f"SHAP failed: {e}"); mlflow.set_tag("shap_failed", True)
+            logger.warning(f"SHAP failed: {e}")
+            mlflow.set_tag("shap_failed", True)
         # Log model
         mlflow.lightgbm.log_model(model, artifact_path="model")
         
@@ -128,12 +135,12 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
 # COMMAND ----------
 
 # Main execution
-spark.sql("USE CATALOG workspace")
+spark.sql(f"USE CATALOG {CATALOG}")
 pdf = spark.read.table(CONFIG["silver_table"]).toPandas()
 pdf['timestamp'] = pd.to_datetime(pdf['timestamp'])
 
 results = []
-parent_run_name = f"lgbm_training_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}"
+parent_run_name = f"lgbm_training_{datetime.now(UTC).strftime('%Y%m%d_%H%M')}"
 
 with mlflow.start_run(run_name=parent_run_name):
     res_24 = train_lgbm_model(pdf, 24, "energy_lgbm_24h")
@@ -143,5 +150,3 @@ with mlflow.start_run(run_name=parent_run_name):
 print("\nLightGBM Training Summary:")
 print(pd.DataFrame(results).to_string(index=False))
 dbutils.notebook.exit("SUCCESS")
-
-# FIX APPLIED: Added training_data_start and training_data_end MLflow tags for drift reference window definition.

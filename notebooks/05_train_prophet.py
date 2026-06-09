@@ -22,13 +22,14 @@ dbutils.library.restartPython()
 
 import logging
 import os
-from datetime import datetime, timezone, timedelta
-import pandas as pd
-import numpy as np
+from datetime import UTC, datetime
+
+import cmdstanpy
 import mlflow
+import numpy as np
+import pandas as pd
 from mlflow.models import infer_signature
 from prophet import Prophet
-import cmdstanpy
 
 # Fix for MLflow model registration in Databricks Unity Catalog
 os.environ['MLFLOW_USE_DATABRICKS_SDK_MODEL_ARTIFACTS_REPO_FOR_UC'] = 'True'
@@ -40,6 +41,8 @@ if tuple(int(x) for x in cmdstanpy.__version__.split(".")[:2]) >= (1, 2):
     )
 from pyspark.sql import functions as F
 
+from src.config import CATALOG, PATHS
+
 # COMMAND ----------
 
 # Widgets for configuration
@@ -47,7 +50,7 @@ dbutils.widgets.text("test_days", "30")
 dbutils.widgets.text("min_train_rows", "2000")
 
 CONFIG = {
-    "silver_table": "workspace.energy_forecasting.silver_features",
+    "silver_table": PATHS.table_silver,
     "test_days": int(dbutils.widgets.get("test_days")),
     "min_train_rows": int(dbutils.widgets.get("min_train_rows")),
 }
@@ -140,13 +143,13 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
 # COMMAND ----------
 
 # Main execution
-spark.sql("USE CATALOG workspace")
+spark.sql(f"USE CATALOG {CATALOG}")
 pdf = spark.read.table(CONFIG["silver_table"]).filter(F.col("value_mwh").isNotNull()).toPandas()
 pdf = pdf.rename(columns={"timestamp": "ds", "value_mwh": "y"})
 pdf['ds'] = pd.to_datetime(pdf['ds']).dt.tz_localize(None)
 
 results = []
-parent_run_name = f"prophet_training_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}"
+parent_run_name = f"prophet_training_{datetime.now(UTC).strftime('%Y%m%d_%H%M')}"
 
 with mlflow.start_run(run_name=parent_run_name):
     res_24 = train_prophet_model(pdf, 24, "energy_prophet_24h")
@@ -156,5 +159,3 @@ with mlflow.start_run(run_name=parent_run_name):
 print("\nProphet Training Summary:")
 print(pd.DataFrame(results).to_string(index=False))
 dbutils.notebook.exit("SUCCESS")
-
-# FIX APPLIED: Added training_data_start and training_data_end MLflow tags for drift reference window definition.

@@ -20,20 +20,27 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-import logging
-import json
 import hashlib
-import uuid
-from datetime import datetime, timezone, timedelta
-from typing import Tuple, Dict, Any, List, Optional
+import logging
+from datetime import UTC, datetime, timedelta
 
-import pandas as pd
-import numpy as np
 import mlflow
-from mlflow.tracking import MlflowClient
-from pyspark.sql import SparkSession, functions as F
-from pyspark.sql.types import *
+import numpy as np
+import pandas as pd
 from delta.tables import DeltaTable
+from mlflow.tracking import MlflowClient
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    BooleanType,
+    DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
+)
+
+from src.config import CATALOG, PATHS
 
 # COMMAND ----------
 
@@ -43,18 +50,14 @@ from delta.tables import DeltaTable
 dbutils.widgets.text("force_backfill", "false")
 dbutils.widgets.text("horizon_hours", "both")
 
-# Unity Catalog Paths
-CATALOG = "workspace"
-SCHEMA = "energy_forecasting"
-
 try:
     pipeline_run_id = dbutils.notebook.entry_point.getDbutils().notebook().getContext().currentRunId().getOrElse(lambda: "manual")
-except:
+except Exception:
     pipeline_run_id = "manual"
 
 CONFIG = {
-    "silver_table": f"{CATALOG}.{SCHEMA}.silver_features",
-    "forecast_table": f"{CATALOG}.{SCHEMA}.gold_forecasts",
+    "silver_table": PATHS.table_silver,
+    "forecast_table": PATHS.table_gold,
     "feature_columns": [
         'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
         'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
@@ -83,7 +86,7 @@ class ModelNotFoundError(Exception):
 # SECTION 2 — MODEL LOADING FROM RUNS (Workaround for IAM Restrictions)
 # ───────────────────────────────────────────────────────────────────────
 
-def load_best_model_from_runs(model_name: str, mlflow_client: MlflowClient) -> Tuple[Any, str, str]:
+def load_best_model_from_runs(model_name: str, mlflow_client: MlflowClient):
     """
     Searches across all experiments for the latest successful run of a model 
     and loads its artifact. This replaces the Registry-based loading.
@@ -129,10 +132,11 @@ def load_best_model_from_runs(model_name: str, mlflow_client: MlflowClient) -> T
         logger.info(f"Loaded {model_name} from Run ID {run_id} (MAPE: {best_run.data.metrics.get('mape'):.4f})")
         return model, "run_latest", run_id
     except Exception as e:
-        if isinstance(e, ModelNotFoundError): raise
-        raise RuntimeError(f"Error searching for {model_name}: {e}")
+        if isinstance(e, ModelNotFoundError):
+            raise
+        raise RuntimeError(f"Error searching for {model_name}: {e}") from e
 
-def load_models_with_fallback(config: dict, mlflow_client: MlflowClient) -> Dict[int, Tuple[Any, str, str]]:
+def load_models_with_fallback(config: dict, mlflow_client: MlflowClient):
     """Tries LGBM, falls back to Prophet if missing."""
     loaded = {}
     for h in [24, 168]:
@@ -144,8 +148,8 @@ def load_models_with_fallback(config: dict, mlflow_client: MlflowClient) -> Dict
             logger.warning(f"{primary} not found in runs, trying fallback {fallback}")
             try:
                 loaded[h] = load_best_model_from_runs(fallback, mlflow_client)
-            except ModelNotFoundError:
-                raise RuntimeError(f"No successful runs available for horizon {h}h.")
+            except ModelNotFoundError as err:
+                raise RuntimeError(f"No successful runs available for horizon {h}h.") from err
     return loaded
 
 # COMMAND ----------
@@ -154,7 +158,7 @@ def load_models_with_fallback(config: dict, mlflow_client: MlflowClient) -> Dict
 # ────────────────────────────────────────────────
 
 def prepare_inference_features(
-    spark: SparkSession,
+    spark,
     config: dict,
     horizon_hours: int,
     forecast_run_at: datetime
@@ -210,7 +214,7 @@ def prepare_inference_features(
 # ─────────────────────────────────
 
 def generate_forecasts(
-    model: Any,
+    model,
     model_name: str,
     model_version: str,
     run_id: str,
@@ -244,7 +248,7 @@ def generate_forecasts(
         preds = forecast["yhat"].clip(lower=0).values
         
     output_rows = []
-    for i, (ts, pred) in enumerate(zip(features_df.index, preds)):
+    for _i, (ts, pred) in enumerate(zip(features_df.index, preds, strict=False)):
         # IDEMPOTENCY: Deterministic Hash
         f_id = hashlib.md5(f"{model_name}_{horizon_hours}_{ts.isoformat()}".encode()).hexdigest()
         
@@ -259,7 +263,7 @@ def generate_forecasts(
             "actual_mwh": None,
             "is_backfilled": False,
             "pipeline_run_id": config["pipeline_run_id"],
-            "created_at": datetime.now(timezone.utc)
+            "created_at": datetime.now(UTC)
         })
         
     return pd.DataFrame(output_rows)
@@ -269,7 +273,7 @@ def generate_forecasts(
 # SECTION 5 — WRITE FORECASTS TO DELTA
 # ───────────────────────────────────────
 
-def write_forecasts(forecasts_df: pd.DataFrame, spark: SparkSession, config: dict, is_backfill: bool = False):
+def write_forecasts(forecasts_df: pd.DataFrame, spark, config: dict, is_backfill: bool = False):
     """Idempotent write using MERGE."""
     schema = StructType([
         StructField("forecast_id", StringType(), False),
@@ -302,7 +306,7 @@ def write_forecasts(forecasts_df: pd.DataFrame, spark: SparkSession, config: dic
 # SECTION 6 — RETROACTIVE ACTUAL FILL
 # ──────────────────────────────────────
 
-def backfill_actuals(spark: SparkSession, config: dict) -> int:
+def backfill_actuals(spark, config: dict) -> int:
     """Updates gold_forecasts with actuals from silver_features."""
     merge_sql = f"""
     MERGE INTO {config['forecast_table']} AS target
@@ -317,7 +321,8 @@ def backfill_actuals(spark: SparkSession, config: dict) -> int:
     try:
         history = spark.sql(f"DESCRIBE HISTORY {config['forecast_table']} LIMIT 1").collect()[0]
         return int(history['operationMetrics'].get('numTargetRowsUpdated', 0))
-    except: return 0
+    except Exception:
+        return 0
 
 # COMMAND ----------
 
@@ -326,7 +331,7 @@ def backfill_actuals(spark: SparkSession, config: dict) -> int:
 
 spark.sql(f"USE CATALOG {CATALOG}")
 mlflow_client = MlflowClient()
-forecast_run_at = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+forecast_run_at = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
 
 h_widget = CONFIG["horizon_hours"]
 horizons = [24, 168] if h_widget == "both" else [int(h_widget)]

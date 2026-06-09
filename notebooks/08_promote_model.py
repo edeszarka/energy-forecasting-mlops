@@ -25,22 +25,26 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-import logging
-import json
 import hashlib
-import os
-from datetime import datetime, timezone
+import json
+import logging
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import List, Dict, Optional
 
 import pandas as pd
-import mlflow
 from mlflow.tracking import MlflowClient
-from pyspark.sql import SparkSession, functions as F
-from pyspark.sql.window import Window
+from pyspark.sql import functions as F
 from pyspark.sql.types import (
-    StructType, StructField, StringType, TimestampType, DoubleType, BooleanType
+    BooleanType,
+    DoubleType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
 )
+from pyspark.sql.window import Window
+
+from src.config import CATALOG, PATHS, RETRAIN_FLAG_PATH
 
 # COMMAND ----------
 
@@ -51,15 +55,10 @@ dbutils.widgets.text("mape_improvement_threshold", "0.01")
 dbutils.widgets.text("dry_run", "false")
 dbutils.widgets.text("force_promote", "false")
 
-# Infrastructure Overrides from GEMINI.md
-CATALOG = "workspace"
-SCHEMA = "energy_forecasting"
-VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/data"
-
 CONFIG = {
-    "eval_table": f"{CATALOG}.{SCHEMA}.model_evaluation",
-    "promotion_log_table": f"{CATALOG}.{SCHEMA}.promotion_log",
-    "flag_path": f"{VOLUME_PATH}/flags/retrain_requested.flag",
+    "eval_table": PATHS.table_eval,
+    "promotion_log_table": PATHS.table_promotion,
+    "flag_path": RETRAIN_FLAG_PATH,
     "model_names": ["energy_lgbm_24h", "energy_lgbm_168h", "energy_prophet_24h", "energy_prophet_168h"],
     "mape_threshold": float(dbutils.widgets.get("mape_improvement_threshold")),
     "dry_run": dbutils.widgets.get("dry_run").lower() == "true",
@@ -87,7 +86,7 @@ def load_latest_evaluation(spark: SparkSession, config: dict) -> pd.DataFrame:
     window = Window.partitionBy("model_name").orderBy(F.col("evaluated_at").desc())
     
     eval_df = spark.table(config["eval_table"]) \
-        .filter(F.col("promoted") == False) \
+        .filter(~F.col("promoted")) \
         .withColumn("rn", F.row_number().over(window)) \
         .filter(F.col("rn") == 1) \
         .drop("rn") \
@@ -103,7 +102,7 @@ def load_latest_evaluation(spark: SparkSession, config: dict) -> pd.DataFrame:
 # SECTION 3 — PROMOTION DECISION LOGIC
 # ───────────────────────────────────────
 
-def decide_promotions(eval_df: pd.DataFrame, mlflow_client: MlflowClient, config: dict) -> List[dict]:
+def decide_promotions(eval_df: pd.DataFrame, mlflow_client: MlflowClient, config: dict) -> list[dict]:
     """
     Applies Champion/Challenger rules using MLflow Run tags (production=true).
     """
@@ -178,7 +177,7 @@ def decide_promotions(eval_df: pd.DataFrame, mlflow_client: MlflowClient, config
 # SECTION 4 — EXECUTE PROMOTIONS (Tag-based Workaround)
 # ──────────────────────────────────────────────────────
 
-def execute_promotions(decisions: list, mlflow_client: MlflowClient, config: dict) -> List[dict]:
+def execute_promotions(decisions: list, mlflow_client: MlflowClient, config: dict) -> list[dict]:
     """
     Simulates promotion by tagging winning runs with production=true and
     removing that tag from former champions.
@@ -201,9 +200,7 @@ def execute_promotions(decisions: list, mlflow_client: MlflowClient, config: dic
             mlflow_client.set_tag(d["challenger_run_id"], "production", "true")
             
             # Add metadata tags for prediction/drift logic
-            run = mlflow_client.get_run(d["challenger_run_id"])
-            training_data_end = run.data.tags.get("training_data_end", "unknown")
-            mlflow_client.set_tag(d["challenger_run_id"], "promoted_at", datetime.now(timezone.utc).isoformat())
+            mlflow_client.set_tag(d["challenger_run_id"], "promoted_at", datetime.now(UTC).isoformat())
             
             logger.info(f"Successfully promoted {d['model_name']} (Run {d['challenger_run_id']}) via MLflow tags.")
             
@@ -251,7 +248,7 @@ def write_promotion_log(
         return
 
     log_rows = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     
     for d in decisions:
         # Deterministic ID for idempotency

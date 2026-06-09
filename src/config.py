@@ -10,9 +10,7 @@ See: https://facebook.github.io/prophet/docs/installing_in_windows.html
 Note that Databricks runs on Linux, so these tools are only needed for local dev.
 """
 
-import os
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 from typing import Final
 
 # API CONFIGURATION
@@ -46,6 +44,7 @@ class DataPaths:
     """Grouped paths for Delta tables and Volumes."""
     # Table names (3-level)
     table_bronze: str = f"{CATALOG}.{SCHEMA}.bronze_load"
+    table_bronze_temp: str = f"{CATALOG}.{SCHEMA}.bronze_temperature"
     table_silver: str = f"{CATALOG}.{SCHEMA}.silver_features"
     table_drift: str = f"{CATALOG}.{SCHEMA}.drift_control"
     table_gold: str = f"{CATALOG}.{SCHEMA}.gold_forecasts"
@@ -54,13 +53,17 @@ class DataPaths:
     table_ingestion_log: str = f"{CATALOG}.{SCHEMA}.ingestion_log"
     
     # Volume paths for files/artifacts
-    bronze: str = f"{VOLUME_PATH}/bronze"
-    silver: str = f"{VOLUME_PATH}/silver"
-    gold: str = f"{VOLUME_PATH}/gold"
-    drift: str = f"{VOLUME_PATH}/drift"
-    reports: str = f"{VOLUME_PATH}/reports"
+    volume_raw_load: str = f"{VOLUME_PATH}/raw_ingestion/load"
+    volume_raw_temp: str = f"{VOLUME_PATH}/raw_ingestion/temperature"
+    volume_archive_load: str = f"{VOLUME_PATH}/raw_ingestion/archive/load"
+    volume_archive_temp: str = f"{VOLUME_PATH}/raw_ingestion/archive/temperature"
+    volume_reports: str = f"{VOLUME_PATH}/reports"
+    volume_flags: str = f"{VOLUME_PATH}/flags"
 
 PATHS: Final[DataPaths] = DataPaths()
+
+# RETRAINING FLAG PATH
+RETRAIN_FLAG_PATH: Final[str] = f"{PATHS.volume_flags}/retrain_requested.flag"
 
 # MLFLOW CONFIGURATION
 MLFLOW_EXPERIMENT_NAME: Final[str] = f"/{SCHEMA}/experiments/main"

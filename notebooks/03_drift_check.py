@@ -20,22 +20,29 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-import logging
 import json
+import logging
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Tuple, Dict, Any, List
 
 import pandas as pd
-import mlflow
-from mlflow.tracking import MlflowClient
-from pyspark.sql import SparkSession, functions as F
-from pyspark.sql.types import *
-
-from evidently.report import Report
 from evidently.metric_presets import DataDriftPreset
 from evidently.metrics import ColumnDriftMetric
+from evidently.report import Report
+from mlflow.tracking import MlflowClient
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    BooleanType,
+    DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
+)
+
+from src.config import PATHS, RETRAIN_FLAG_PATH, SCHEMA
 
 # COMMAND ----------
 
@@ -48,18 +55,12 @@ dbutils.widgets.text("consecutive_hours_threshold", "3")
 dbutils.widgets.text("current_window_days", "7")
 dbutils.widgets.text("min_rows_for_drift", "100")
 
-# Unity Catalog Paths
-CATALOG = "workspace"
-SCHEMA = "energy_forecasting"
-VOLUME_NAME = "data" # Assumed volume for files
-VOLUME_ROOT = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME_NAME}"
-
 CONFIG = {
-    "silver_table": f"{CATALOG}.{SCHEMA}.silver_features",
-    "forecast_table": f"{CATALOG}.{SCHEMA}.gold_forecasts",
-    "drift_table": f"{CATALOG}.{SCHEMA}.drift_control",
-    "report_base_path": f"{VOLUME_ROOT}/drift_reports",
-    "flag_path": f"{VOLUME_ROOT}/flags/retrain_requested.flag",
+    "silver_table": PATHS.table_silver,
+    "forecast_table": PATHS.table_gold,
+    "drift_table": PATHS.table_drift,
+    "report_base_path": PATHS.volume_reports,
+    "flag_path": RETRAIN_FLAG_PATH,
     "drift_threshold": float(dbutils.widgets.get("drift_threshold")),
     "consecutive_hours_threshold": int(dbutils.widgets.get("consecutive_hours_threshold")),
     "current_window_days": int(dbutils.widgets.get("current_window_days")),
@@ -81,9 +82,9 @@ logger = logging.getLogger("drift_check")
 
 # Idempotency Check
 # ────────────────
-check_time = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+check_time = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
 
-def check_already_ran(spark: SparkSession, config: dict, check_time: datetime) -> bool:
+def check_already_ran(spark, config: dict, check_time: datetime) -> bool:
     """
     Prevents duplicate runs within the same hour to handle job retries gracefully.
     """
@@ -117,13 +118,13 @@ def get_reference_window(
         run = mlflow_client.get_run(prod_version.run_id)
         
         # Notebook 06 logs training_data_end tag and run start_time
-        training_end = datetime.fromisoformat(run.data.tags.get("training_data_end")).replace(tzinfo=timezone.utc)
-        training_start = datetime.fromtimestamp(run.info.start_time / 1000.0, tz=timezone.utc)
+        training_end = datetime.fromisoformat(run.data.tags.get("training_data_end")).replace(tzinfo=UTC)
+        training_start = datetime.fromtimestamp(run.info.start_time / 1000.0, tz=UTC)
         
         source = "mlflow_training_window"
     except Exception as e:
         logger.warning(f"Could not retrieve MLflow Production window: {e}. Using fallback.")
-        training_end = datetime.now(timezone.utc) - timedelta(days=7)
+        training_end = datetime.now(UTC) - timedelta(days=7)
         training_start = training_end - timedelta(days=30)
         source = "fallback_30d"
 
@@ -147,7 +148,7 @@ def get_current_window(
     """
     Returns (current_df, window_start, window_end).
     """
-    window_end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    window_end = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     window_start = window_end - timedelta(days=config["current_window_days"])
     
     current_df = spark.table(config["silver_table"]) \
@@ -310,14 +311,14 @@ def should_trigger_retrain(
     # Check cooldown (24h)
     try:
         last_retrain = spark.table(config["drift_table"]) \
-            .filter(F.col("retrain_triggered") == True) \
+            .filter(F.col("retrain_triggered")) \
             .orderBy(F.col("check_timestamp").desc()) \
             .limit(1) \
             .select("check_timestamp") \
             .collect()
             
         if last_retrain:
-            hours_since = (datetime.now(timezone.utc) - last_retrain[0][0].replace(tzinfo=timezone.utc)).total_seconds() / 3600
+            hours_since = (datetime.now(UTC) - last_retrain[0][0].replace(tzinfo=UTC)).total_seconds() / 3600
             if hours_since < 24:
                 return False, f"Cooldown active: last retrain {hours_since:.1f}h ago."
     except Exception:
@@ -339,7 +340,7 @@ def write_retrain_flag(config: dict, reason: str, consecutive_hours: int, drifte
     Writes JSON flag file to Volume.
     """
     flag_data = {
-        "triggered_at": datetime.now(timezone.utc).isoformat(),
+        "triggered_at": datetime.now(UTC).isoformat(),
         "reason": reason,
         "consecutive_drift_hours": consecutive_hours,
         "drifted_features": drifted_features,
@@ -451,7 +452,7 @@ result_row = {
     "consecutive_drift_hours": int(consecutive_hours),
     "retrain_triggered": bool(should_retrain),
     "report_path": report_path,
-    "created_at": datetime.now(timezone.utc)
+    "created_at": datetime.now(UTC)
 }
 
 # Create table if not exists

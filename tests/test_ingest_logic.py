@@ -3,14 +3,24 @@ Unit tests for ingestion logic used in notebooks/01_ingest.py.
 Note: PySpark/Delta operations are mocked or tested via logic extraction.
 """
 
-import json
-from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, patch
+import sys
+from unittest.mock import MagicMock
 
-import pandas as pd
-import pytest
+# Mock delta and pyspark for environments where they are not installed (e.g., local/CI)
+if "delta" not in sys.modules:
+    sys.modules["delta"] = MagicMock()
+if "delta.tables" not in sys.modules:
+    sys.modules["delta.tables"] = MagicMock()
+if "pyspark" not in sys.modules:
+    sys.modules["pyspark"] = MagicMock()
+if "pyspark.sql" not in sys.modules:
+    sys.modules["pyspark.sql"] = MagicMock()
+
+from datetime import datetime, timedelta
+from unittest.mock import patch
 
 from src.config import ENTSO_E_MAX_RANGE_DAYS
+
 
 def calculate_chunks(start: datetime, end: datetime, max_days: int):
     """Extracted chunking logic for testing."""
@@ -100,7 +110,7 @@ def test_widget_fallback_to_env():
     def get_param(name, default):
         try:
             return mock_dbutils.widgets.get(name)
-        except:
+        except Exception:
             return default
             
     assert get_param("lookback_hours", "2") == "2"

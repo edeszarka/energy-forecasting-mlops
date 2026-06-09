@@ -32,8 +32,8 @@ dbutils.library.restartPython()
 # Cell 1: Environment Setup
 # Adds the project root to sys.path to allow importing from the 'src' directory.
 
-import sys
 import os
+import sys
 from pathlib import Path
 
 # In Databricks, the working directory is the folder containing the notebook.
@@ -47,8 +47,8 @@ if root_path not in sys.path:
 # Cell 2: Widgets
 # Handles runtime parameters and resolves the execution date.
 
-from datetime import datetime, timezone, timedelta
 import logging
+from datetime import UTC, datetime, timedelta
 
 try:
     dbutils.widgets.text("run_date", "")
@@ -63,7 +63,7 @@ lookback_files = int(dbutils.widgets.get("lookback_files"))
 
 if not run_date_raw:
     # Floor to current UTC hour
-    run_date = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    run_date = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
 else:
     run_date = datetime.fromisoformat(run_date_raw.replace("Z", "+00:00"))
 
@@ -78,21 +78,25 @@ print(f"Lookback files: {lookback_files}")
 
 import json
 from pathlib import PurePosixPath
+
+from delta.tables import DeltaTable
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
-    StructType, StructField, TimestampType, DoubleType, StringType, BooleanType, IntegerType
+    BooleanType,
+    DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
 )
 from pyspark.sql.utils import AnalysisException
-from delta.tables import DeltaTable
 
-from src.config import (
-    PATHS, ENTSO_E_ZONE,
-    ENV_DATABRICKS_HOST, ENV_DATABRICKS_TOKEN
-)
+from src.config import CATALOG, ENTSO_E_ZONE, PATHS, SCHEMA
 
 # Setup catalog and schema
-spark.sql("USE CATALOG workspace")
-spark.sql("CREATE SCHEMA IF NOT EXISTS workspace.energy_forecasting")
+spark.sql(f"USE CATALOG {CATALOG}")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
 spark.conf.set("spark.sql.session.timeZone", "UTC")
 
 logger = logging.getLogger("01_ingest")
@@ -135,8 +139,8 @@ TEMPERATURE_TABLE_SCHEMA = StructType(TEMPERATURE_BRONZE_SCHEMA.fields + [
 # Cell 5: Resolve file paths to ingest
 # Identifies which JSON files exist in the Volume for the given lookback window.
 
-VOLUME_LOAD_PATH = "/Volumes/workspace/energy_forecasting/data/raw_ingestion/load"
-VOLUME_TEMP_PATH = "/Volumes/workspace/energy_forecasting/data/raw_ingestion/temperature"
+VOLUME_LOAD_PATH = PATHS.volume_raw_load
+VOLUME_TEMP_PATH = PATHS.volume_raw_temp
 
 found_load_files = []
 missing_load_files = []
@@ -154,7 +158,7 @@ for i in range(lookback_files):
     try:
         dbutils.fs.ls(load_path)
         found_load_files.append(load_path)
-    except:
+    except Exception:
         missing_load_files.append(load_path)
         logger.warning(f"Load file missing: {load_path}")
         
@@ -162,7 +166,7 @@ for i in range(lookback_files):
     try:
         dbutils.fs.ls(temp_path)
         found_temp_files.append(temp_path)
-    except:
+    except Exception:
         missing_temp_files.append(temp_path)
         logger.warning(f"Temperature file missing: {temp_path}")
 
@@ -204,7 +208,7 @@ print(f"Loaded {load_raw_df.count()} load rows and {temp_raw_df.count()} tempera
 try:
     context = json.loads(dbutils.notebook.entry_point.getDbutils().notebook().getContext().toJson())
     run_id = str(context.get("tags", {}).get("runId", "manual"))
-except:
+except Exception:
     run_id = "manual"
 
 # Validate and augment Load
@@ -229,7 +233,7 @@ temp_processed_df = temp_raw_df.dropDuplicates(["timestamp"]) \
 if not dry_run:
     # Load Table
     DeltaTable.createIfNotExists(spark) \
-        .tableName("workspace.energy_forecasting.bronze_load") \
+        .tableName(PATHS.table_bronze) \
         .addColumns(BRONZE_TABLE_SCHEMA) \
         .partitionedBy("country") \
         .property("delta.autoOptimize.optimizeWrite", "true") \
@@ -239,7 +243,7 @@ if not dry_run:
     
     # Temperature Table
     DeltaTable.createIfNotExists(spark) \
-        .tableName("workspace.energy_forecasting.bronze_temperature") \
+        .tableName(PATHS.table_bronze_temp) \
         .addColumns(TEMPERATURE_TABLE_SCHEMA) \
         .property("delta.autoOptimize.optimizeWrite", "true") \
         .property("delta.autoOptimize.autoCompact", "true") \
@@ -252,7 +256,7 @@ if not dry_run:
 # Idempotently updates the bronze load table.
 
 if not dry_run:
-    delta_load = DeltaTable.forName(spark, "workspace.energy_forecasting.bronze_load")
+    delta_load = DeltaTable.forName(spark, PATHS.table_bronze)
     
     delta_load.alias("target").merge(
         load_processed_df.alias("source"),
@@ -277,7 +281,7 @@ if not dry_run:
 # Idempotently updates the bronze temperature table.
 
 if not dry_run and not temp_processed_df.isEmpty():
-    delta_temp = DeltaTable.forName(spark, "workspace.energy_forecasting.bronze_temperature")
+    delta_temp = DeltaTable.forName(spark, PATHS.table_bronze_temp)
     
     delta_temp.alias("target").merge(
         temp_processed_df.alias("source"),
@@ -313,7 +317,7 @@ if not dry_run:
     
     log_data = [(
         run_id, run_date, len(found_load_files), len(missing_load_files),
-        int(load_count), int(null_load), 0, dry_run, datetime.now(timezone.utc)
+        int(load_count), int(null_load), 0, dry_run, datetime.now(UTC)
     )]
     
     spark.createDataFrame(log_data, log_schema) \
@@ -321,7 +325,7 @@ if not dry_run:
         .write.format("delta") \
         .mode("append") \
         .partitionBy("date") \
-        .saveAsTable("workspace.energy_forecasting.ingestion_log")
+        .saveAsTable(PATHS.table_ingestion_log)
 
 # COMMAND ----------
 
@@ -329,8 +333,8 @@ if not dry_run:
 # Moves successfully ingested files to an archive folder to prevent reprocessing.
 
 if not dry_run:
-    ARCHIVE_LOAD_PATH = "/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/load"
-    ARCHIVE_TEMP_PATH = "/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/temperature"
+    ARCHIVE_LOAD_PATH = PATHS.volume_archive_load
+    ARCHIVE_TEMP_PATH = PATHS.volume_archive_temp
     
     dbutils.fs.mkdirs(ARCHIVE_LOAD_PATH)
     dbutils.fs.mkdirs(ARCHIVE_TEMP_PATH)
@@ -338,18 +342,46 @@ if not dry_run:
     for f in found_load_files:
         try:
             dbutils.fs.mv(f, f"{ARCHIVE_LOAD_PATH}/{PurePosixPath(f).name}")
-        except:
+        except Exception:
             logger.warning(f"Failed to archive load file: {f}")
             
     for f in found_temp_files:
         try:
             dbutils.fs.mv(f, f"{ARCHIVE_TEMP_PATH}/{PurePosixPath(f).name}")
-        except:
+        except Exception:
             logger.warning(f"Failed to archive temperature file: {f}")
 
 # COMMAND ----------
 
-# Cell 12: Notebook exit
+# Cell 12: Automated Backfilling Detection
+# Checks for gaps in the bronze_load table and requests backfills if needed.
+
+detected_gaps = []
+
+if not dry_run:
+    # Look for timestamps with null values in the last 30 days
+    # We ignore the very latest hours as they might be arriving now
+    gap_check_end = run_date - timedelta(hours=3)
+    gap_check_start = run_date - timedelta(days=30)
+    
+    gaps_df = spark.read.table(PATHS.table_bronze) \
+        .filter(F.col("timestamp").between(gap_check_start, gap_check_end)) \
+        .filter(F.col("country") == ENTSO_E_ZONE) \
+        .filter(F.col("value_mwh").isNull()) \
+        .select("timestamp") \
+        .orderBy("timestamp") \
+        .collect()
+    
+    if gaps_df:
+        detected_gaps = [row.timestamp.isoformat() for row in gaps_df]
+        logger.warning(f"Detected {len(detected_gaps)} gaps in bronze_load. First gap: {detected_gaps[0]}")
+        
+        # NOTE: In a full implementation, we could trigger a GHA workflow via API here.
+        # For now, we log it and include it in the notebook exit for monitoring.
+
+# COMMAND ----------
+
+# Cell 13: Notebook exit
 # Terminates with a summary status.
 
 dbutils.notebook.exit(json.dumps({
@@ -357,6 +389,8 @@ dbutils.notebook.exit(json.dumps({
     "files_found": len(found_load_files),
     "files_missing": len(missing_load_files),
     "rows_ingested": int(load_count),
+    "gaps_detected_count": len(detected_gaps),
+    "first_gap": detected_gaps[0] if detected_gaps else None,
     "dry_run": dry_run,
     "run_id": run_id,
     "run_date": run_date.isoformat(),
