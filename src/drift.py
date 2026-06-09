@@ -5,9 +5,8 @@ This module provides functions to extract results from monitoring reports
 and calculate performance degradation metrics.
 """
 
-import pandas as pd
 import numpy as np
-from typing import Dict, Any
+import pandas as pd
 
 def extract_drift_results(report_dict: dict) -> dict:
     """

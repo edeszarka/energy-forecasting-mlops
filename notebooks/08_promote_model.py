@@ -29,20 +29,18 @@ import logging
 import json
 import hashlib
 import os
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
-from typing import List, Dict, Optional
 
 import pandas as pd
-import mlflow
 from mlflow.tracking import MlflowClient
-from pyspark.sql import SparkSession, functions as F
+from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 from pyspark.sql.types import (
     StructType, StructField, StringType, TimestampType, DoubleType, BooleanType
 )
 
-from src.config import PATHS, CATALOG, SCHEMA, RETRAIN_FLAG_PATH
+from src.config import PATHS, CATALOG, RETRAIN_FLAG_PATH
 
 # COMMAND ----------
 
@@ -84,7 +82,7 @@ def load_latest_evaluation(spark: SparkSession, config: dict) -> pd.DataFrame:
     window = Window.partitionBy("model_name").orderBy(F.col("evaluated_at").desc())
     
     eval_df = spark.table(config["eval_table"]) \
-        .filter(F.col("promoted") == False) \
+        .filter(~F.col("promoted")) \
         .withColumn("rn", F.row_number().over(window)) \
         .filter(F.col("rn") == 1) \
         .drop("rn") \
@@ -100,7 +98,7 @@ def load_latest_evaluation(spark: SparkSession, config: dict) -> pd.DataFrame:
 # SECTION 3 — PROMOTION DECISION LOGIC
 # ───────────────────────────────────────
 
-def decide_promotions(eval_df: pd.DataFrame, mlflow_client: MlflowClient, config: dict) -> List[dict]:
+def decide_promotions(eval_df: pd.DataFrame, mlflow_client: MlflowClient, config: dict) -> list[dict]:
     """
     Applies Champion/Challenger rules using MLflow Run tags (production=true).
     """
@@ -175,7 +173,7 @@ def decide_promotions(eval_df: pd.DataFrame, mlflow_client: MlflowClient, config
 # SECTION 4 — EXECUTE PROMOTIONS (Tag-based Workaround)
 # ──────────────────────────────────────────────────────
 
-def execute_promotions(decisions: list, mlflow_client: MlflowClient, config: dict) -> List[dict]:
+def execute_promotions(decisions: list, mlflow_client: MlflowClient, config: dict) -> list[dict]:
     """
     Simulates promotion by tagging winning runs with production=true and
     removing that tag from former champions.
@@ -198,9 +196,7 @@ def execute_promotions(decisions: list, mlflow_client: MlflowClient, config: dic
             mlflow_client.set_tag(d["challenger_run_id"], "production", "true")
             
             # Add metadata tags for prediction/drift logic
-            run = mlflow_client.get_run(d["challenger_run_id"])
-            training_data_end = run.data.tags.get("training_data_end", "unknown")
-            mlflow_client.set_tag(d["challenger_run_id"], "promoted_at", datetime.now(timezone.utc).isoformat())
+            mlflow_client.set_tag(d["challenger_run_id"], "promoted_at", datetime.now(UTC).isoformat())
             
             logger.info(f"Successfully promoted {d['model_name']} (Run {d['challenger_run_id']}) via MLflow tags.")
             
@@ -248,7 +244,7 @@ def write_promotion_log(
         return
 
     log_rows = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     
     for d in decisions:
         # Deterministic ID for idempotency

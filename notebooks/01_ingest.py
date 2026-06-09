@@ -47,7 +47,7 @@ if root_path not in sys.path:
 # Cell 2: Widgets
 # Handles runtime parameters and resolves the execution date.
 
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 import logging
 
 try:
@@ -63,7 +63,7 @@ lookback_files = int(dbutils.widgets.get("lookback_files"))
 
 if not run_date_raw:
     # Floor to current UTC hour
-    run_date = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    run_date = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
 else:
     run_date = datetime.fromisoformat(run_date_raw.replace("Z", "+00:00"))
 
@@ -86,8 +86,7 @@ from pyspark.sql.utils import AnalysisException
 from delta.tables import DeltaTable
 
 from src.config import (
-    PATHS, ENTSO_E_ZONE, CATALOG, SCHEMA,
-    ENV_DATABRICKS_HOST, ENV_DATABRICKS_TOKEN
+    PATHS, ENTSO_E_ZONE, CATALOG, SCHEMA
 )
 
 # Setup catalog and schema
@@ -154,7 +153,7 @@ for i in range(lookback_files):
     try:
         dbutils.fs.ls(load_path)
         found_load_files.append(load_path)
-    except:
+    except Exception:
         missing_load_files.append(load_path)
         logger.warning(f"Load file missing: {load_path}")
         
@@ -162,7 +161,7 @@ for i in range(lookback_files):
     try:
         dbutils.fs.ls(temp_path)
         found_temp_files.append(temp_path)
-    except:
+    except Exception:
         missing_temp_files.append(temp_path)
         logger.warning(f"Temperature file missing: {temp_path}")
 
@@ -313,7 +312,7 @@ if not dry_run:
     
     log_data = [(
         run_id, run_date, len(found_load_files), len(missing_load_files),
-        int(load_count), int(null_load), 0, dry_run, datetime.now(timezone.utc)
+        int(load_count), int(null_load), 0, dry_run, datetime.now(UTC)
     )]
     
     spark.createDataFrame(log_data, log_schema) \

@@ -10,9 +10,7 @@ See: https://facebook.github.io/prophet/docs/installing_in_windows.html
 Note that Databricks runs on Linux, so these tools are only needed for local dev.
 """
 
-import os
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 from typing import Final
 
 # API CONFIGURATION
