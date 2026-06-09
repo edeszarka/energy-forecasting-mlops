@@ -83,6 +83,10 @@ def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
     # Holiday Eve (Day before holiday or weekend)
     # We use shift(-1) on the sorted local timestamps to see if tomorrow is a holiday
     df_sorted = df.sort_values("timestamp")
+    
+    # Fix FutureWarning: set option to opt-in to future behavior
+    pd.set_option("future.no_silent_downcasting", True)
+    
     tomorrow_is_holiday = df_sorted["is_holiday"].shift(-1).fillna(False)
     tomorrow_is_weekend = (df_sorted["day_of_week"].shift(-1) >= 5).fillna(False)
     df["is_holiday_eve"] = tomorrow_is_holiday | tomorrow_is_weekend

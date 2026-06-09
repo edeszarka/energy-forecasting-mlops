@@ -3,8 +3,21 @@ Unit tests for ingestion logic used in notebooks/01_ingest.py.
 Note: PySpark/Delta operations are mocked or tested via logic extraction.
 """
 
+import sys
+from unittest.mock import MagicMock
+
+# Mock delta and pyspark for environments where they are not installed (e.g., local/CI)
+if "delta" not in sys.modules:
+    sys.modules["delta"] = MagicMock()
+if "delta.tables" not in sys.modules:
+    sys.modules["delta.tables"] = MagicMock()
+if "pyspark" not in sys.modules:
+    sys.modules["pyspark"] = MagicMock()
+if "pyspark.sql" not in sys.modules:
+    sys.modules["pyspark.sql"] = MagicMock()
+
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from src.config import ENTSO_E_MAX_RANGE_DAYS
 
