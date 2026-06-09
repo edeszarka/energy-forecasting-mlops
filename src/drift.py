@@ -45,7 +45,7 @@ def extract_drift_results(report_dict: dict) -> dict:
             "drift_score_temp": score_temp
         }
     except (KeyError, StopIteration) as e:
-        raise ValueError(f"Failed to extract metrics from report dict. Structure may have changed: {e}")
+        raise ValueError(f"Failed to extract metrics from report dict. Structure may have changed: {e}") from e
 
 def compute_prediction_mae(
     forecasts_df: pd.DataFrame,

@@ -2,13 +2,11 @@
 Unit tests for the feature engineering logic in src/features.py.
 """
 
-from datetime import datetime, timezone
-
 import numpy as np
 import pandas as pd
 import pytest
-from freezegun import freeze_time
 
+from src.config import MIN_TRAINING_ROWS
 from src.features import (
     add_calendar_features,
     add_lag_features,
@@ -17,7 +15,6 @@ from src.features import (
     build_feature_matrix,
     get_feature_columns,
 )
-from src.config import MIN_TRAINING_ROWS
 
 @pytest.fixture
 def make_hourly_df():
@@ -134,7 +131,7 @@ def test_weather_fill_forward(make_hourly_df):
     feat_df = add_weather_features(df, weather_df)
     # 3 hour gap should be filled
     assert not feat_df["temperature_c"].isna().any()
-    assert feat_df.iloc[6]["is_weather_imputed"] == True
+    assert feat_df.iloc[6]["is_weather_imputed"]
 
 def test_build_feature_matrix_column_contract(make_hourly_df, make_weather_df):
     # Need enough rows to pass MIN_TRAINING_ROWS

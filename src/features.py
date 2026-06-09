@@ -21,14 +21,12 @@ Features defined:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Final
 
 import holidays
 import numpy as np
 import pandas as pd
 
-from src.config import FIXED_HOLIDAYS, LAG_HOURS, MIN_TRAINING_ROWS, ROLLING_WINDOW_DAYS
+from src.config import FIXED_HOLIDAYS, LAG_HOURS, MIN_TRAINING_ROWS
 
 logger = logging.getLogger(__name__)
 

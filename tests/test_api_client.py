@@ -5,15 +5,15 @@ Uses pytest, responses for HTTP mocking, and freezegun for time mocking.
 """
 
 import os
-from datetime import datetime, timedelta, date
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import pytest
 import responses
 from freezegun import freeze_time
 
-from src.api_client import EntsoEClient, OpenMeteoClient, EntsoEParseError, fetch_all
-from src.config import ENV_ENTSO_E_API_KEY, ENTSO_E_BASE_URL, OPENMETEO_BASE_URL
+from src.api_client import EntsoEClient, EntsoEParseError, OpenMeteoClient, fetch_all
+from src.config import ENTSO_E_BASE_URL, ENV_ENTSO_E_API_KEY, OPENMETEO_BASE_URL
 
 # MOCK DATA
 VALID_ENTSOE_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -135,8 +135,8 @@ def test_fetch_weather_fallback_imputation(openmeteo_client):
     imputed_df = openmeteo_client._fallback_weather(df, ["temperature_c"])
     
     assert not imputed_df["temperature_c"].isna().any()
-    assert imputed_df.loc[2, "is_weather_imputed"] == True
-    assert imputed_df.loc[0, "is_weather_imputed"] == False
+    assert imputed_df.loc[2, "is_weather_imputed"]
+    assert not imputed_df.loc[0, "is_weather_imputed"]
 
 def test_build_retry_session_mounts_https():
     from src.api_client import build_retry_session

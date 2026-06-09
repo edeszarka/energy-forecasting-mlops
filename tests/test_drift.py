@@ -3,8 +3,8 @@ Unit tests for the monitoring logic in src/drift.py.
 """
 
 import pandas as pd
-import pytest
-from src.drift import extract_drift_results, compute_prediction_mae
+
+from src.drift import compute_prediction_mae, extract_drift_results
 
 def test_extract_drift_results_v4_format():
     """Tests extraction from a mock evidently report dict."""

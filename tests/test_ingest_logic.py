@@ -3,12 +3,8 @@ Unit tests for ingestion logic used in notebooks/01_ingest.py.
 Note: PySpark/Delta operations are mocked or tested via logic extraction.
 """
 
-import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
-
-import pandas as pd
-import pytest
 
 from src.config import ENTSO_E_MAX_RANGE_DAYS
 
@@ -100,7 +96,7 @@ def test_widget_fallback_to_env():
     def get_param(name, default):
         try:
             return mock_dbutils.widgets.get(name)
-        except:
+        except Exception:
             return default
             
     assert get_param("lookback_hours", "2") == "2"
