@@ -45,7 +45,9 @@ VALID_ENTSOE_XML = """<?xml version="1.0" encoding="UTF-8"?>
 VALID_OPENMETEO_JSON = {
     "hourly": {
         "time": ["2024-01-01T00:00", "2024-01-01T01:00"],
-        "temperature_2m": [5.0, 4.5]
+        "temperature_2m": [5.0, 4.5],
+        "relative_humidity_2m": [60, 62],
+        "cloud_cover": [20, 25]
     }
 }
 
@@ -103,7 +105,7 @@ def test_fetch_actual_load_hides_api_key_in_errors(entsoe_client):
     assert "fake_key" not in str(exc.value)
 
 @responses.activate
-def test_fetch_temperature_happy_path(openmeteo_client):
+def test_fetch_weather_happy_path(openmeteo_client):
     responses.add(
         responses.GET,
         OPENMETEO_BASE_URL,
@@ -111,26 +113,30 @@ def test_fetch_temperature_happy_path(openmeteo_client):
         status=200
     )
     
-    df = openmeteo_client.fetch_temperature(date(2024, 1, 1), date(2024, 1, 1))
+    df = openmeteo_client.fetch_weather(date(2024, 1, 1), date(2024, 1, 1))
     
     assert len(df) == 2
     # Check if timezone is UTC
     assert str(df["timestamp"].dt.tz) in ["UTC", "datetime.timezone.utc", "UTC0"]
     assert df.iloc[0]["temperature_c"] == 5.0
+    assert "humidity_pct" in df.columns
+    assert "cloud_cover_pct" in df.columns
 
-def test_fetch_temperature_fallback_imputation(openmeteo_client):
+def test_fetch_weather_fallback_imputation(openmeteo_client):
     # Create DF with NaNs
     # Note: 'h' is the new standard for hourly frequency in pandas/Python 3.14
     df = pd.DataFrame({
         "timestamp": pd.date_range("2024-01-01", periods=10, freq="h", tz="UTC"),
-        "temperature_c": [10.0, 11.0, None, 13.0, None, 15.0, 16.0, 17.0, 18.0, 19.0]
+        "temperature_c": [10.0, 11.0, None, 13.0, None, 15.0, 16.0, 17.0, 18.0, 19.0],
+        "humidity_pct": [60.0] * 10,
+        "cloud_cover_pct": [20.0] * 10
     })
     
-    imputed_df = openmeteo_client._fallback_temperature(df)
+    imputed_df = openmeteo_client._fallback_weather(df, ["temperature_c"])
     
     assert not imputed_df["temperature_c"].isna().any()
-    assert imputed_df.loc[2, "is_temp_imputed"] == True
-    assert imputed_df.loc[0, "is_temp_imputed"] == False
+    assert imputed_df.loc[2, "is_weather_imputed"] == True
+    assert imputed_df.loc[0, "is_weather_imputed"] == False
 
 def test_build_retry_session_mounts_https():
     from src.api_client import build_retry_session

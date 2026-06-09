@@ -204,31 +204,31 @@ class OpenMeteoClient:
         """Initializes the client with a retry session."""
         self.session = build_retry_session()
 
-    def fetch_temperature(
+    def fetch_weather(
         self,
         start_date: date,
         end_date: date,
     ) -> pd.DataFrame:
         """
-        Fetch hourly temperature for Budapest.
+        Fetch hourly temperature, humidity, and cloud cover for Budapest.
         
         Args:
             start_date: Start date.
             end_date: End date.
             
         Returns:
-            DataFrame with columns: timestamp, temperature_c, source, fetched_at.
+            DataFrame with weather metrics.
         """
         params = {
             "latitude": OPENMETEO_LAT,
             "longitude": OPENMETEO_LON,
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
-            "hourly": "temperature_2m",
+            "hourly": "temperature_2m,relative_humidity_2m,cloud_cover",
             "timezone": OPENMETEO_TIMEZONE
         }
 
-        logger.info("Fetching OpenMeteo temperature from %s to %s", start_date, end_date)
+        logger.info("Fetching OpenMeteo weather from %s to %s", start_date, end_date)
         response = self.session.get(OPENMETEO_BASE_URL, params=params, timeout=HTTP_TIMEOUT_SECONDS)
         response.raise_for_status()
 
@@ -238,7 +238,9 @@ class OpenMeteoClient:
 
         df = pd.DataFrame({
             "timestamp": pd.to_datetime(data["hourly"]["time"]),
-            "temperature_c": data["hourly"]["temperature_2m"]
+            "temperature_c": data["hourly"]["temperature_2m"],
+            "humidity_pct": data["hourly"].get("relative_humidity_2m"),
+            "cloud_cover_pct": data["hourly"].get("cloud_cover")
         })
 
         # OpenMeteo returns timestamps in the requested timezone. Convert to UTC.
@@ -248,22 +250,24 @@ class OpenMeteoClient:
         df["fetched_at"] = pd.Timestamp.now(tz="UTC")
 
         # Impute if needed
-        if df["temperature_c"].isna().any():
-            df = self._fallback_temperature(df)
+        weather_cols = ["temperature_c", "humidity_pct", "cloud_cover_pct"]
+        if df[weather_cols].isna().any().any():
+            df = self._fallback_weather(df, weather_cols)
         else:
-            df["is_temp_imputed"] = False
+            df["is_weather_imputed"] = False
 
-        logger.info("Successfully fetched %d temperature records", len(df))
+        logger.info("Successfully fetched %d weather records", len(df))
         return df
 
-    def _fallback_temperature(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Fills NaN temperatures with a 72-hour rolling mean."""
-        logger.warning("Detected NaNs in temperature data. Applying rolling mean imputation.")
-        df["is_temp_imputed"] = df["temperature_c"].isna()
-        # 72-hour rolling window, minimum 1 period to fill as much as possible
-        df["temperature_c"] = df["temperature_c"].fillna(
-            df["temperature_c"].rolling(window=72, min_periods=1, center=True).mean()
-        )
+    def _fallback_weather(self, df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+        """Fills NaN weather metrics with a 72-hour rolling mean."""
+        logger.warning("Detected NaNs in weather data. Applying rolling mean imputation.")
+        df["is_weather_imputed"] = df[columns].isna().any(axis=1)
+        for col in columns:
+            # 72-hour rolling window, minimum 1 period to fill as much as possible
+            df[col] = df[col].fillna(
+                df[col].rolling(window=72, min_periods=1, center=True).mean()
+            )
         return df
 
 def fetch_all(
@@ -286,6 +290,6 @@ def fetch_all(
     openmeteo = OpenMeteoClient()
 
     load_df = entsoe.fetch_actual_load(start, end)
-    temp_df = openmeteo.fetch_temperature(start.date(), end.date())
+    temp_df = openmeteo.fetch_weather(start.date(), end.date())
 
     return load_df, temp_df

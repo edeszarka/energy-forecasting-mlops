@@ -13,7 +13,7 @@ from src.features import (
     add_calendar_features,
     add_lag_features,
     add_rolling_features,
-    add_temperature_features,
+    add_weather_features,
     build_feature_matrix,
     get_feature_columns,
 )
@@ -31,15 +31,17 @@ def make_hourly_df():
     return _make
 
 @pytest.fixture
-def make_temp_df():
-    """Fixture to create a mock hourly temperature DataFrame."""
+def make_weather_df():
+    """Fixture to create a mock hourly weather DataFrame."""
     def _make(n_hours=200, start="2024-01-01"):
         ts = pd.date_range(start=start, periods=n_hours, freq="h", tz="UTC")
         temp = 10 + 5 * np.cos(2 * np.pi * np.arange(n_hours) / 24)
         return pd.DataFrame({
             "timestamp": ts, 
-            "temperature_c": temp, 
-            "is_temp_imputed": False
+            "temperature_c": temp,
+            "humidity_pct": [60.0] * n_hours,
+            "cloud_cover_pct": [20.0] * n_hours,
+            "is_weather_imputed": False
         })
     return _make
 
@@ -111,34 +113,36 @@ def test_rolling_features_min_periods(make_hourly_df):
     # Row 72 should have a value (index 71 is the 72nd row)
     assert not np.isnan(feat_df.iloc[71]["rolling_7d_mean"])
 
-def test_temperature_merge_empty_temp(make_hourly_df):
+def test_weather_merge_empty_df(make_hourly_df):
     df = make_hourly_df(n_hours=10)
-    temp_df = pd.DataFrame(columns=["timestamp", "temperature_c", "is_temp_imputed"])
+    weather_df = pd.DataFrame(columns=["timestamp", "temperature_c", "humidity_pct", "cloud_cover_pct", "is_weather_imputed"])
     
-    feat_df = add_temperature_features(df, temp_df)
+    feat_df = add_weather_features(df, weather_df)
     assert feat_df["temp_missing"].all()
     assert feat_df["temperature_c"].isna().all()
 
-def test_temperature_fill_forward(make_hourly_df):
+def test_weather_fill_forward(make_hourly_df):
     df = make_hourly_df(n_hours=20)
-    temp_df = pd.DataFrame({
+    weather_df = pd.DataFrame({
         "timestamp": df["timestamp"],
         "temperature_c": [10.0] * 5 + [np.nan] * 3 + [10.0] * 12,
-        "is_temp_imputed": [False] * 20
+        "humidity_pct": [50.0] * 20,
+        "cloud_cover_pct": [10.0] * 20,
+        "is_weather_imputed": [False] * 20
     })
     
-    feat_df = add_temperature_features(df, temp_df)
+    feat_df = add_weather_features(df, weather_df)
     # 3 hour gap should be filled
     assert not feat_df["temperature_c"].isna().any()
-    assert feat_df.iloc[6]["is_temp_imputed"] == True
+    assert feat_df.iloc[6]["is_weather_imputed"] == True
 
-def test_build_feature_matrix_column_contract(make_hourly_df, make_temp_df):
+def test_build_feature_matrix_column_contract(make_hourly_df, make_weather_df):
     # Need enough rows to pass MIN_TRAINING_ROWS
     n = MIN_TRAINING_ROWS + 200
     load_df = make_hourly_df(n_hours=n)
-    temp_df = make_temp_df(n_hours=n)
+    weather_df = make_weather_df(n_hours=n)
     
-    feat_df = build_feature_matrix(load_df, temp_df)
+    feat_df = build_feature_matrix(load_df, weather_df)
     
     for col in get_feature_columns():
         assert col in feat_df.columns
@@ -151,13 +155,13 @@ def test_build_feature_matrix_raises_on_insufficient_data():
     with pytest.raises(ValueError, match="Insufficient data"):
         build_feature_matrix(df, pd.DataFrame())
 
-def test_training_serving_skew_guard(make_hourly_df, make_temp_df):
+def test_training_serving_skew_guard(make_hourly_df, make_weather_df):
     n = MIN_TRAINING_ROWS + 100
     load_df = make_hourly_df(n_hours=n)
-    temp_df = make_temp_df(n_hours=n)
+    weather_df = make_weather_df(n_hours=n)
     
-    df1 = build_feature_matrix(load_df, temp_df)
-    df2 = build_feature_matrix(load_df, temp_df)
+    df1 = build_feature_matrix(load_df, weather_df)
+    df2 = build_feature_matrix(load_df, weather_df)
     
     # Exclude feature_built_at as it will always differ
     pd.testing.assert_frame_equal(df1.drop(columns=["feature_built_at"]), df2.drop(columns=["feature_built_at"]))
