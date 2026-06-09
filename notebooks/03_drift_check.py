@@ -23,15 +23,16 @@ dbutils.library.restartPython()
 import logging
 import json
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Tuple, Dict, Any, List
 
 import pandas as pd
 import mlflow
 from mlflow.tracking import MlflowClient
-from pyspark.sql import SparkSession, functions as F
-from pyspark.sql.types import *
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType, StructField, TimestampType, DoubleType, StringType, BooleanType, IntegerType
+)
 
 from evidently.report import Report
 from evidently.metric_presets import DataDriftPreset
@@ -77,9 +78,9 @@ logger = logging.getLogger("drift_check")
 
 # Idempotency Check
 # ────────────────
-check_time = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+check_time = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
 
-def check_already_ran(spark: SparkSession, config: dict, check_time: datetime) -> bool:
+def check_already_ran(spark, config: dict, check_time: datetime) -> bool:
     """
     Prevents duplicate runs within the same hour to handle job retries gracefully.
     """
@@ -113,13 +114,13 @@ def get_reference_window(
         run = mlflow_client.get_run(prod_version.run_id)
         
         # Notebook 06 logs training_data_end tag and run start_time
-        training_end = datetime.fromisoformat(run.data.tags.get("training_data_end")).replace(tzinfo=timezone.utc)
-        training_start = datetime.fromtimestamp(run.info.start_time / 1000.0, tz=timezone.utc)
+        training_end = datetime.fromisoformat(run.data.tags.get("training_data_end")).replace(tzinfo=UTC)
+        training_start = datetime.fromtimestamp(run.info.start_time / 1000.0, tz=UTC)
         
         source = "mlflow_training_window"
     except Exception as e:
         logger.warning(f"Could not retrieve MLflow Production window: {e}. Using fallback.")
-        training_end = datetime.now(timezone.utc) - timedelta(days=7)
+        training_end = datetime.now(UTC) - timedelta(days=7)
         training_start = training_end - timedelta(days=30)
         source = "fallback_30d"
 
@@ -143,7 +144,7 @@ def get_current_window(
     """
     Returns (current_df, window_start, window_end).
     """
-    window_end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    window_end = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     window_start = window_end - timedelta(days=config["current_window_days"])
     
     current_df = spark.table(config["silver_table"]) \
@@ -313,7 +314,7 @@ def should_trigger_retrain(
             .collect()
             
         if last_retrain:
-            hours_since = (datetime.now(timezone.utc) - last_retrain[0][0].replace(tzinfo=timezone.utc)).total_seconds() / 3600
+            hours_since = (datetime.now(UTC) - last_retrain[0][0].replace(tzinfo=UTC)).total_seconds() / 3600
             if hours_since < 24:
                 return False, f"Cooldown active: last retrain {hours_since:.1f}h ago."
     except Exception:
@@ -335,7 +336,7 @@ def write_retrain_flag(config: dict, reason: str, consecutive_hours: int, drifte
     Writes JSON flag file to Volume.
     """
     flag_data = {
-        "triggered_at": datetime.now(timezone.utc).isoformat(),
+        "triggered_at": datetime.now(UTC).isoformat(),
         "reason": reason,
         "consecutive_drift_hours": consecutive_hours,
         "drifted_features": drifted_features,
@@ -447,7 +448,7 @@ result_row = {
     "consecutive_drift_hours": int(consecutive_hours),
     "retrain_triggered": bool(should_retrain),
     "report_path": report_path,
-    "created_at": datetime.now(timezone.utc)
+    "created_at": datetime.now(UTC)
 }
 
 # Create table if not exists

@@ -24,15 +24,16 @@ import logging
 import json
 import hashlib
 import uuid
-from datetime import datetime, timezone, timedelta
-from typing import Tuple, Dict, Any, List, Optional
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 import numpy as np
 import mlflow
 from mlflow.tracking import MlflowClient
-from pyspark.sql import SparkSession, functions as F
-from pyspark.sql.types import *
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType, StructField, TimestampType, DoubleType, StringType, BooleanType, IntegerType
+)
 from delta.tables import DeltaTable
 
 from src.config import PATHS, CATALOG, SCHEMA
@@ -81,7 +82,7 @@ class ModelNotFoundError(Exception):
 # SECTION 2 — MODEL LOADING FROM RUNS (Workaround for IAM Restrictions)
 # ───────────────────────────────────────────────────────────────────────
 
-def load_best_model_from_runs(model_name: str, mlflow_client: MlflowClient) -> Tuple[Any, str, str]:
+def load_best_model_from_runs(model_name: str, mlflow_client: MlflowClient):
     """
     Searches across all experiments for the latest successful run of a model 
     and loads its artifact. This replaces the Registry-based loading.
@@ -257,7 +258,7 @@ def generate_forecasts(
             "actual_mwh": None,
             "is_backfilled": False,
             "pipeline_run_id": config["pipeline_run_id"],
-            "created_at": datetime.now(timezone.utc)
+            "created_at": datetime.now(UTC)
         })
         
     return pd.DataFrame(output_rows)
@@ -324,7 +325,7 @@ def backfill_actuals(spark: SparkSession, config: dict) -> int:
 
 spark.sql(f"USE CATALOG {CATALOG}")
 mlflow_client = MlflowClient()
-forecast_run_at = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+forecast_run_at = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
 
 h_widget = CONFIG["horizon_hours"]
 horizons = [24, 168] if h_widget == "both" else [int(h_widget)]

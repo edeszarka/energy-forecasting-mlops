@@ -20,7 +20,7 @@ dbutils.library.restartPython()
 
 import logging
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import pandas as pd
 import mlflow
 from mlflow.tracking import MlflowClient
@@ -137,7 +137,7 @@ for name in model_names:
             "champion_mape": champion["mape"] if champion else None,
             "challenger_wins": challenger_wins,
             "first_run": first_run,
-            "evaluated_at": datetime.now(timezone.utc),
+            "evaluated_at": datetime.now(UTC),
             "promoted": False # Placeholder for notebook 08
         })
 

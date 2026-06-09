@@ -22,7 +22,7 @@ dbutils.library.restartPython()
 
 import logging
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 import pandas as pd
 import numpy as np
 import mlflow
@@ -148,7 +148,7 @@ pdf = pdf.rename(columns={"timestamp": "ds", "value_mwh": "y"})
 pdf['ds'] = pd.to_datetime(pdf['ds']).dt.tz_localize(None)
 
 results = []
-parent_run_name = f"prophet_training_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}"
+parent_run_name = f"prophet_training_{datetime.now(UTC).strftime('%Y%m%d_%H%M')}"
 
 with mlflow.start_run(run_name=parent_run_name):
     res_24 = train_prophet_model(pdf, 24, "energy_prophet_24h")

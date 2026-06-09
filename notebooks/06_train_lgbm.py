@@ -23,7 +23,7 @@ dbutils.library.restartPython()
 import logging
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import pandas as pd
 import numpy as np
 import mlflow
@@ -135,7 +135,7 @@ pdf = spark.read.table(CONFIG["silver_table"]).toPandas()
 pdf['timestamp'] = pd.to_datetime(pdf['timestamp'])
 
 results = []
-parent_run_name = f"lgbm_training_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}"
+parent_run_name = f"lgbm_training_{datetime.now(UTC).strftime('%Y%m%d_%H%M')}"
 
 with mlflow.start_run(run_name=parent_run_name):
     res_24 = train_lgbm_model(pdf, 24, "energy_lgbm_24h")

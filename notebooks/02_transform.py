@@ -43,7 +43,7 @@ if root_path not in sys.path:
 # Cell 2: Widgets
 # Handles runtime parameters for the transformation process.
 
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 import logging
 
 try:
@@ -60,7 +60,7 @@ dry_run = dbutils.widgets.get("dry_run").lower() == "true"
 force_full_rebuild = dbutils.widgets.get("force_full_rebuild").lower() == "true"
 
 if not run_date_raw:
-    run_date = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    run_date = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
 else:
     run_date = datetime.fromisoformat(run_date_raw.replace("Z", "+00:00"))
 
