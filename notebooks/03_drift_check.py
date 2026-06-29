@@ -1,11 +1,13 @@
 # Databricks notebook source
 # COMMAND ----------
 
-import subprocess, sys
 from pathlib import Path
 nb_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
 req_path = str(Path("/Workspace" + nb_path).parent.parent / "requirements.txt")
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_path])
+
+# COMMAND ----------
+
+# MAGIC %pip install -r {req_path}
 
 # COMMAND ----------
 
