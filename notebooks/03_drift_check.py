@@ -11,7 +11,39 @@ req_path = str(Path("/Workspace" + nb_path).parent.parent / "requirements.txt")
 
 # COMMAND ----------
 
+import subprocess, sys
+check = subprocess.run(
+    [sys.executable, "-m", "pip", "show", "evidently"],
+    capture_output=True, text=True
+)
+print(check.stdout)
+verify = subprocess.run(
+    [sys.executable, "-c",
+     "from evidently.metric_presets import DataDriftPreset; print('OK')"],
+    capture_output=True, text=True
+)
+if verify.returncode != 0:
+    raise RuntimeError(
+        f"evidently installed but metric_presets missing. stderr: {verify.stderr}\n"
+        "Fix: pin a different evidently version in requirements.txt"
+    )
+print("evidently verify:", verify.stdout)
+
+# COMMAND ----------
+
 dbutils.library.restartPython()
+
+# COMMAND ----------
+
+import subprocess, sys
+result = subprocess.run(
+    [sys.executable, "-c",
+     "import os, evidently; root = os.path.dirname(evidently.__file__); "
+     "print([d for d in os.listdir(root) if 'preset' in d or 'metric' in d])"],
+    capture_output=True, text=True
+)
+print("evidently submodules found:", result.stdout)
+print("version:", __import__('evidently').__version__)
 
 # COMMAND ----------
 
