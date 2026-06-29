@@ -3,8 +3,10 @@
 
 import subprocess, sys
 from pathlib import Path
-notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
-req_path = str(Path(notebook_path).parent.parent / "requirements.txt")
+nb_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+if not nb_path.startswith("/Workspace"):
+    nb_path = "/Workspace" + nb_path
+req_path = str(Path(nb_path).parent.parent / "requirements.txt")
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_path])
 
 # COMMAND ----------
