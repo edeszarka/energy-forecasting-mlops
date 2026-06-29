@@ -223,7 +223,8 @@ load_processed_df = load_raw_df.dropDuplicates(["timestamp"]) \
 
 # Augment Temp
 temp_processed_df = temp_raw_df.dropDuplicates(["timestamp"]) \
-    .withColumn("run_id", F.lit(run_id))
+    .withColumn("run_id", F.lit(run_id)) \
+    .fillna({"is_temp_imputed": False})
 
 # COMMAND ----------
 
