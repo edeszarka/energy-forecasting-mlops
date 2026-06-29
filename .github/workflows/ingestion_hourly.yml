@@ -152,9 +152,16 @@ jobs:
                       curr_start = curr_end
                   
                   if chunks:
-                      load_df = pd.concat(chunks).drop_duplicates(subset=["timestamp"], keep="last")
+                        load_df = pd.concat(chunks).drop_duplicates(subset=["timestamp"], keep="last")
+                        # ENTSO-E may return 15-min or 30-min data — aggregate to hourly
+                        load_df = load_df.set_index("timestamp").resample("h").agg({
+                            "value_mwh": "mean",
+                            "country": "first",
+                            "source": "first",
+                            "fetched_at": "first"
+                        }).reset_index()
                   else:
-                      load_status = "empty"
+                        load_status = "empty"
               except Exception as e:
                   print(f"ENTSO-E fetch failed: {e}")
                   load_status = "fetch_failed"
