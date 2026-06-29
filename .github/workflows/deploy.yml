@@ -28,13 +28,21 @@ jobs:
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: databricks bundle validate --target prod
 
-      - name: Deploy Bundle
-        id: deploy
+      - name: Deploy Bundle (Prod)
+        id: deploy_prod
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
           ENTSO_E_API_KEY: ${{ secrets.ENTSO_E_API_KEY }}
         run: databricks bundle deploy --target prod
+
+      - name: Deploy Bundle (Dev)
+        id: deploy_dev
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          ENTSO_E_API_KEY: ${{ secrets.ENTSO_E_API_KEY }}
+        run: databricks bundle deploy --target dev
 
       - name: Post Summary on Failure
         if: failure()
