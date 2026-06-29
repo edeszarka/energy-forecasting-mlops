@@ -1,13 +1,16 @@
 # Databricks notebook source
 # COMMAND ----------
 
-import subprocess, sys
+import subprocess, sys, tempfile, os
 from pathlib import Path
 nb_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
-if not nb_path.startswith("/Workspace"):
-    nb_path = "/Workspace" + nb_path
-req_path = str(Path(nb_path).parent.parent / "requirements.txt")
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_path])
+ws_path = "/Workspace" + nb_path if not nb_path.startswith("/Workspace") else nb_path
+req_ws_path = str(Path(ws_path).parent.parent / "requirements.txt")
+tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w")
+tmp.close()
+dbutils.fs.cp(req_ws_path, "file://" + tmp.name)
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", tmp.name])
+os.unlink(tmp.name)
 
 # COMMAND ----------
 
