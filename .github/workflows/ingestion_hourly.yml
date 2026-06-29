@@ -166,8 +166,9 @@ jobs:
               temp_error = ""
               try:
                   temp_client = OpenMeteoClient()
-                  temp_df = temp_client.fetch_temperature(fetch_start.date(), fetch_end.date())
-                  temp_df = temp_client._fallback_temperature(temp_df)
+                  temp_df = temp_client.fetch_weather(fetch_start.date(), fetch_end.date())
+                  weather_cols = ["temperature_c", "humidity_pct", "cloud_cover_pct"]
+                  temp_df = temp_client._fallback_weather(temp_df, weather_cols)
               except Exception as e:
                   print(f"OpenMeteo fetch failed: {e}")
                   temp_status = "fetch_failed"

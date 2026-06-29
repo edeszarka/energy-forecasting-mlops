@@ -234,15 +234,11 @@ def generate_forecasts(
     
     # Force alignment and log for debugging
     X = features_df[MODEL_FEATURES].copy()
-    print(f"DEBUG: X shape: {X.shape}")
-    print(f"DEBUG: X columns: {X.columns.tolist()}")
     logger.info(f"Model Input: {X.shape[1]} features. Columns: {list(X.columns)}")
     
     if "lgbm" in model_name:
-        print(f"DEBUG: Calling LGBM predict for {model_name} (Run: {run_id})")
         preds = np.clip(model.predict(X), a_min=0, a_max=None)
     else: # Prophet
-        print(f"DEBUG: Calling Prophet predict for {model_name} (Run: {run_id})")
         p_df = X.reset_index().rename(columns={"timestamp": "ds"})
         forecast = model.predict(p_df)
         preds = forecast["yhat"].clip(lower=0).values
