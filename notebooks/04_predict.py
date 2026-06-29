@@ -1,7 +1,7 @@
 # Databricks notebook source
 # COMMAND ----------
 
-# MAGIC %pip install -r ../requirements.txt
+# MAGIC %pip install -r /Workspace/Users/ede.szarka@gmail.com/energy_forecasting_dev/files/requirements.txt
 
 # COMMAND ----------
 
