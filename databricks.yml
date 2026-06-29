@@ -23,7 +23,7 @@ resources:
               - mlflow==2.13.0
               - holidays==0.46
               - shap==0.45.0
-              - requests>=2.31.0
+              - requests>=2.32.0
               - pandas>=2.0,<2.3
               - numpy>=1.26.0,<2.0
               - pyarrow>=14.0
@@ -75,7 +75,7 @@ resources:
               - mlflow==2.13.0
               - holidays==0.46
               - shap==0.45.0
-              - requests>=2.31.0
+              - requests>=2.32.0
               - pandas>=2.0,<2.3
               - numpy>=1.26.0,<2.0
               - pyarrow>=14.0
