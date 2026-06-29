@@ -1,7 +1,11 @@
 # Databricks notebook source
 # COMMAND ----------
 
-# MAGIC %pip install -r /Workspace/Users/ede.szarka@gmail.com/energy_forecasting_dev/files/requirements.txt
+import subprocess, sys
+from pathlib import Path
+notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+req_path = str(Path(notebook_path).parent.parent / "requirements.txt")
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_path])
 
 # COMMAND ----------
 
