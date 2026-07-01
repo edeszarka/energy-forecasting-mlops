@@ -15,6 +15,16 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
+import os
+import sys
+from pathlib import Path
+
+root_path = str(Path(os.getcwd()).parent)
+if root_path not in sys.path:
+    sys.path.append(root_path)
+
+# COMMAND ----------
+
 # %% [markdown]
 # # 04_predict
 # **Purpose:** Load Production models from MLflow, generate 24h and 168h forecasts, and backfill past actuals.

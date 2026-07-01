@@ -9,6 +9,16 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
+import os
+import sys
+from pathlib import Path
+
+root_path = str(Path(os.getcwd()).parent)
+if root_path not in sys.path:
+    sys.path.append(root_path)
+
+# COMMAND ----------
+
 # %% [markdown]
 # # 06_train_lgbm
 # **Purpose:** Train two LightGBM models (24h and 168h horizons) using a direct multi-step approach.

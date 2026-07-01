@@ -9,6 +9,16 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
+import os
+import sys
+from pathlib import Path
+
+root_path = str(Path(os.getcwd()).parent)
+if root_path not in sys.path:
+    sys.path.append(root_path)
+
+# COMMAND ----------
+
 # %% [markdown]
 # # 05_train_prophet
 # **Purpose:** Train two Prophet models (24h and 168h horizons) using Hungarian energy consumption data.
