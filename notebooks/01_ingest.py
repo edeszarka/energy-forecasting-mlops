@@ -223,12 +223,16 @@ null_load = load_raw_df.filter(F.col("value_mwh").isNull()).count()
 if load_count > 0 and (null_load / load_count) > 0.1:
     logger.warning(f"High gap rate detected: {null_load/load_count:.2%}")
 
-load_processed_df = load_raw_df.dropDuplicates(["timestamp"]) \
+load_processed_df = load_raw_df \
+    .filter(F.col("timestamp").isNotNull()) \
+    .dropDuplicates(["timestamp"]) \
     .withColumn("run_id", F.lit(run_id)) \
     .withColumn("is_gap", F.col("value_mwh").isNull())
 
 # Augment Temp
-temp_processed_df = temp_raw_df.dropDuplicates(["timestamp"]) \
+temp_processed_df = temp_raw_df \
+    .filter(F.col("timestamp").isNotNull()) \
+    .dropDuplicates(["timestamp"]) \
     .withColumn("run_id", F.lit(run_id)) \
     .fillna({"is_temp_imputed": False})
 
