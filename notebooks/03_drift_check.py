@@ -235,7 +235,7 @@ def run_data_drift(
     Runs Evidently DataDriftPreset and returns results.
     """
     report = Report(metrics=[
-        DataDriftPreset(drift_share_threshold=config["drift_threshold"]),
+        DataDriftPreset(drift_share=config["drift_threshold"]),
         ColumnDriftMetric(column_name=config["target_column"]),
         ColumnDriftMetric(column_name="temperature_c")
     ])
@@ -247,16 +247,22 @@ def run_data_drift(
         # Evidently v0.4.x / v0.5.x path compatibility
         metrics = report_dict["metrics"]
         
-        # Data Drift Preset (index 0)
+        # DatasetDriftMetric (index 0) — aggregate drift summary
         dataset_drift = metrics[0]["result"]["dataset_drift"]
         n_drifted_features = metrics[0]["result"]["number_of_drifted_columns"]
-        drifted_features = metrics[0]["result"]["drifted_columns"]
-        
-        # Target Drift (index 1)
-        drift_score_target = metrics[1]["result"]["drift_score"]
-        
-        # Temp Drift (index 2)
-        drift_score_temp = metrics[2]["result"]["drift_score"]
+
+        # DataDriftTable (index 1) — per-column drift details
+        drift_by_columns = metrics[1]["result"]["drift_by_columns"]
+        drifted_features = [
+            col for col, info in drift_by_columns.items()
+            if info["drift_detected"]
+        ]
+
+        # ColumnDriftMetric (index 2) — target column drift score
+        drift_score_target = metrics[2]["result"]["drift_score"]
+
+        # ColumnDriftMetric (index 3) — temperature drift score
+        drift_score_temp = metrics[3]["result"]["drift_score"]
         
     except (KeyError, IndexError) as e:
         logger.error(f"Error parsing Evidently results: {e}")

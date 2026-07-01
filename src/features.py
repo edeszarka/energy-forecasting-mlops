@@ -214,13 +214,22 @@ def add_weather_features(
         df["temp_missing"] = True
         return df
 
-    # Merge weather data
-    df = pd.merge(
-        df, 
-        weather_df[["timestamp", "temperature_c", "humidity_pct", "cloud_cover_pct", "is_weather_imputed"]], 
-        on="timestamp", 
-        how="left"
+    # Normalize column names from bronze table
+    weather_df = weather_df.rename(
+        columns={"is_temp_imputed": "is_weather_imputed"},
+        errors="ignore",
     )
+
+    # Select only the columns that exist in weather_df
+    weather_cols = ["timestamp", "temperature_c", "humidity_pct", "cloud_cover_pct", "is_weather_imputed"]
+    available = [c for c in weather_cols if c in weather_df.columns]
+
+    df = pd.merge(df, weather_df[available], on="timestamp", how="left")
+
+    # Create any missing weather columns as NaN
+    for col in weather_cols:
+        if col not in df.columns:
+            df[col] = np.nan if col != "is_weather_imputed" else False
     
     # Impute missing values
     df = _fill_missing_weather(df)
