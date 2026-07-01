@@ -79,13 +79,14 @@ import os
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 from evidently.metric_preset import DataDriftPreset
 from evidently.metrics import ColumnDriftMetric
 from evidently.report import Report
 from mlflow.tracking import MlflowClient
-from pyspark.sql import functions as F
+from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.types import (
     BooleanType,
     DoubleType,

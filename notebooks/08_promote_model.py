@@ -9,6 +9,16 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
+import os
+import sys
+from pathlib import Path
+
+root_path = str(Path(os.getcwd()).parent)
+if root_path not in sys.path:
+    sys.path.append(root_path)
+
+# COMMAND ----------
+
 # %% [markdown]
 # # 08_promote_model
 # **Purpose:** Automate model promotion from Staging/None to Production using Champion/Challenger logic.
@@ -33,7 +43,7 @@ from pathlib import Path
 
 import pandas as pd
 from mlflow.tracking import MlflowClient
-from pyspark.sql import functions as F
+from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.types import (
     BooleanType,
     DoubleType,
