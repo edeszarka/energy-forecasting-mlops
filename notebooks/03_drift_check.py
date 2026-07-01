@@ -11,6 +11,21 @@ req_path = str(Path("/Workspace" + nb_path).parent.parent / "requirements.txt")
 
 # COMMAND ----------
 
+# Cell: Environment Setup
+# Adds the project root to sys.path to allow importing from the 'src' directory.
+
+import os
+import sys
+from pathlib import Path
+
+# In Databricks, the working directory is the folder containing the notebook.
+# We add the parent directory (project root) to sys.path.
+root_path = str(Path(os.getcwd()).parent)
+if root_path not in sys.path:
+    sys.path.append(root_path)
+
+# COMMAND ----------
+
 import subprocess, sys
 check = subprocess.run(
     [sys.executable, "-m", "pip", "show", "evidently"],
@@ -61,6 +76,7 @@ print("version:", __import__('evidently').__version__)
 import json
 import logging
 import os
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -79,6 +95,11 @@ from pyspark.sql.types import (
     StructType,
     TimestampType,
 )
+
+# Add project root to sys.path for src package imports (after kernel restart)
+root_path = str(Path(os.getcwd()).parent)
+if root_path not in sys.path:
+    sys.path.append(root_path)
 
 from src.config import PATHS, RETRAIN_FLAG_PATH, SCHEMA
 
