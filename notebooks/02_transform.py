@@ -131,6 +131,8 @@ SILVER_SCHEMA = StructType([
     StructField("rolling_7d_std", DoubleType(), True),
     StructField("rolling_24h_mean", DoubleType(), True),
     StructField("temperature_c", DoubleType(), True),
+    StructField("humidity_pct", DoubleType(), True),
+    StructField("cloud_cover_pct", DoubleType(), True),
     StructField("temperature_lag_24h", DoubleType(), True),
     StructField("is_temp_imputed", BooleanType(), False),
     StructField("temp_missing", BooleanType(), False),

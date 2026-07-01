@@ -130,6 +130,8 @@ BRONZE_TABLE_SCHEMA = StructType(BRONZE_SCHEMA.fields + [
 TEMPERATURE_BRONZE_SCHEMA = StructType([
     StructField("timestamp", TimestampType(), False),
     StructField("temperature_c", DoubleType(), True),
+    StructField("humidity_pct", DoubleType(), True),
+    StructField("cloud_cover_pct", DoubleType(), True),
     StructField("is_temp_imputed", BooleanType(), False),
     StructField("source", StringType(), False),
     StructField("fetched_at", TimestampType(), False)
