@@ -19,12 +19,12 @@ check = subprocess.run(
 print(check.stdout)
 verify = subprocess.run(
     [sys.executable, "-c",
-     "from evidently.metric_presets import DataDriftPreset; print('OK')"],
+     "from evidently.metric_preset import DataDriftPreset; print('OK')"],
     capture_output=True, text=True
 )
 if verify.returncode != 0:
     raise RuntimeError(
-        f"evidently installed but metric_presets missing. stderr: {verify.stderr}\n"
+        f"evidently installed but metric_preset missing. stderr: {verify.stderr}\n"
         "Fix: pin a different evidently version in requirements.txt"
     )
 print("evidently verify:", verify.stdout)
@@ -65,7 +65,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
-from evidently.metric_presets import DataDriftPreset
+from evidently.metric_preset import DataDriftPreset
 from evidently.metrics import ColumnDriftMetric
 from evidently.report import Report
 from mlflow.tracking import MlflowClient
