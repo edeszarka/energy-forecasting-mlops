@@ -187,13 +187,13 @@ def _fill_missing_weather(df: pd.DataFrame) -> pd.DataFrame:
             df[col].rolling(window=72, min_periods=1, center=True).mean()
         )
     
-    # Update is_weather_imputed flag
-    if "is_weather_imputed" not in df.columns:
-        df["is_weather_imputed"] = False
-        
+    # Update is_temp_imputed flag
+    if "is_temp_imputed" not in df.columns:
+        df["is_temp_imputed"] = False
+
     # Mark as imputed if any weather column was missing but is now filled
     was_filled = (missing_before & df[weather_cols].notna()).any(axis=1)
-    df["is_weather_imputed"] = df["is_weather_imputed"] | was_filled
+    df["is_temp_imputed"] = df["is_temp_imputed"] | was_filled
     
     return df
 
@@ -210,18 +210,12 @@ def add_weather_features(
         df["humidity_pct"] = np.nan
         df["cloud_cover_pct"] = np.nan
         df["temperature_lag_24h"] = np.nan
-        df["is_weather_imputed"] = False
+        df["is_temp_imputed"] = False
         df["temp_missing"] = True
         return df
 
-    # Normalize column names from bronze table
-    weather_df = weather_df.rename(
-        columns={"is_temp_imputed": "is_weather_imputed"},
-        errors="ignore",
-    )
-
     # Select only the columns that exist in weather_df
-    weather_cols = ["timestamp", "temperature_c", "humidity_pct", "cloud_cover_pct", "is_weather_imputed"]
+    weather_cols = ["timestamp", "temperature_c", "humidity_pct", "cloud_cover_pct", "is_temp_imputed"]
     available = [c for c in weather_cols if c in weather_df.columns]
 
     df = pd.merge(df, weather_df[available], on="timestamp", how="left")
@@ -229,7 +223,7 @@ def add_weather_features(
     # Create any missing weather columns as NaN
     for col in weather_cols:
         if col not in df.columns:
-            df[col] = np.nan if col != "is_weather_imputed" else False
+            df[col] = np.nan if col != "is_temp_imputed" else False
     
     # Impute missing values
     df = _fill_missing_weather(df)
