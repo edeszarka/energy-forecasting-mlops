@@ -78,6 +78,17 @@ ROLLING_WINDOW_DAYS: Final[int] = 7
 FORECAST_HORIZON_24H: Final[int] = 24
 FORECAST_HORIZON_7D: Final[int] = 168
 
+# Single source of truth for model input columns
+# Used by: 06_train_lgbm.py, 04_predict.py, 03_drift_check.py
+# If you add a feature here, update src/features.py:get_feature_columns() too
+MODEL_INPUT_FEATURES: Final[list[str]] = [
+    'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
+    'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
+    'hour_of_day', 'day_of_week', 'month',
+    'is_weekend', 'is_holiday',
+    'humidity_pct', 'cloud_cover_pct',
+]
+
 # DRIFT MONITORING THRESHOLDS
 DRIFT_SCORE_THRESHOLD: Final[float] = 0.15   # Jensen-Shannon divergence
 DRIFT_CONSECUTIVE_HOURS: Final[int] = 3      # Trigger retraining
@@ -100,18 +111,28 @@ TRAIN_TEST_SPLIT_DAYS: Final[int] = 30
 MIN_TRAINING_ROWS: Final[int] = 720
 PROPHET_SEASONALITY_MODE: Final[str] = "multiplicative"
 
+# Default LightGBM hyperparameters (sklearn API names for LGBMRegressor)
+# Used by 06_train_lgbm.py when Optuna tuning is disabled (n_trials=0)
+# Tuned params override individual keys when tuning is active
 LGBM_PARAMS: Final[dict] = {
     "objective": "regression",
     "metric": "mae",
-    "num_leaves": 63,
+    "num_leaves": 64,
     "learning_rate": 0.05,
-    "feature_fraction": 0.8,
-    "bagging_fraction": 0.8,
-    "bagging_freq": 5,
-    "min_child_samples": 20,
     "n_estimators": 500,
-    "early_stopping_rounds": 50,
+    "min_child_samples": 20,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_alpha": 0.1,
+    "reg_lambda": 0.1,
+    "random_state": 42,
     "verbose": -1,
 }
+
+# OPTUNA HYPERPARAMETER OPTIMIZATION
+OPTUNA_N_TRIALS: Final[int] = 25
+OPTUNA_TIMEOUT_SECONDS: Final[int] = 600
+OPTUNA_N_SPLITS: Final[int] = 3          # TimeSeriesSplit folds
+OPTUNA_GAP_HOURS: Final[int] = 168       # 1-week gap between train/test splits
 
 # FIX APPLIED: Corrected table_silver name to silver_features and added missing table constants (drift, gold, eval, promotion, ingestion_log).

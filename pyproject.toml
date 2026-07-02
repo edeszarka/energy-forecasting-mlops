@@ -11,6 +11,7 @@ dependencies = [
     "requests>=2.32.0",
     "holidays==0.46",
     "shap==0.45.0",
+    "optuna>=4.0.0",
     "pandas>=2.0",
     "numpy>=1.26",
     "pyarrow>=14.0"
@@ -24,7 +25,8 @@ dev = [
     "ruff>=0.4.0",
     "mypy>=1.9.0",
     "responses>=0.25.0",
-    "freezegun>=1.4.0"
+    "freezegun>=1.4.0",
+    "pre-commit>=4.0.0"
 ]
 
 [tool.ruff]

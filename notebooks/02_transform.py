@@ -2,6 +2,7 @@
 # COMMAND ----------
 
 from pathlib import Path
+
 nb_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
 req_path = str(Path("/Workspace" + nb_path).parent.parent / "requirements.txt")
 
@@ -17,16 +18,16 @@ dbutils.library.restartPython()
 
 # MAGIC %md
 # MAGIC # 02_transform
-# MAGIC 
+# MAGIC
 # MAGIC This notebook reads raw data from bronze Delta tables, applies feature engineering using the shared `src/features.py` library, and writes the results to the silver features table.
-# MAGIC 
+# MAGIC
 # MAGIC **Inputs:**
 # MAGIC - `workspace.energy_forecasting.bronze_load`
 # MAGIC - `workspace.energy_forecasting.bronze_temperature`
-# MAGIC 
+# MAGIC
 # MAGIC **Outputs:**
 # MAGIC - `workspace.energy_forecasting.silver_features`
-# MAGIC 
+# MAGIC
 # MAGIC **Schedule:** Hourly, following `01_ingest`.
 
 # COMMAND ----------
@@ -110,37 +111,39 @@ logging.basicConfig(level=logging.INFO)
 # Cell 3: Silver schema definition
 # Defines the structural contract for the silver feature table.
 
-SILVER_SCHEMA = StructType([
-    StructField("timestamp", TimestampType(), False),
-    StructField("country", StringType(), False),
-    StructField("value_mwh", DoubleType(), True),
-    StructField("is_gap", BooleanType(), False),
-    StructField("hour_of_day", IntegerType(), False),
-    StructField("day_of_week", IntegerType(), False),
-    StructField("month", IntegerType(), False),
-    StructField("quarter", IntegerType(), False),
-    StructField("is_weekend", BooleanType(), False),
-    StructField("is_holiday", BooleanType(), False),
-    StructField("is_holiday_eve", BooleanType(), False),
-    StructField("days_since_epoch", IntegerType(), False),
-    StructField("lag_24h", DoubleType(), True),
-    StructField("lag_48h", DoubleType(), True),
-    StructField("lag_168h", DoubleType(), True),
-    StructField("has_lag_gap", BooleanType(), False),
-    StructField("rolling_7d_mean", DoubleType(), True),
-    StructField("rolling_7d_std", DoubleType(), True),
-    StructField("rolling_24h_mean", DoubleType(), True),
-    StructField("temperature_c", DoubleType(), True),
-    StructField("humidity_pct", DoubleType(), True),
-    StructField("cloud_cover_pct", DoubleType(), True),
-    StructField("temperature_lag_24h", DoubleType(), True),
-    StructField("is_temp_imputed", BooleanType(), False),
-    StructField("temp_missing", BooleanType(), False),
-    StructField("source", StringType(), True),
-    StructField("fetched_at", TimestampType(), True),
-    StructField("feature_built_at", TimestampType(), False),
-    StructField("run_id", StringType(), False)
-])
+SILVER_SCHEMA = StructType(
+    [
+        StructField("timestamp", TimestampType(), False),
+        StructField("country", StringType(), False),
+        StructField("value_mwh", DoubleType(), True),
+        StructField("is_gap", BooleanType(), False),
+        StructField("hour_of_day", IntegerType(), False),
+        StructField("day_of_week", IntegerType(), False),
+        StructField("month", IntegerType(), False),
+        StructField("quarter", IntegerType(), False),
+        StructField("is_weekend", BooleanType(), False),
+        StructField("is_holiday", BooleanType(), False),
+        StructField("is_holiday_eve", BooleanType(), False),
+        StructField("days_since_epoch", IntegerType(), False),
+        StructField("lag_24h", DoubleType(), True),
+        StructField("lag_48h", DoubleType(), True),
+        StructField("lag_168h", DoubleType(), True),
+        StructField("has_lag_gap", BooleanType(), False),
+        StructField("rolling_7d_mean", DoubleType(), True),
+        StructField("rolling_7d_std", DoubleType(), True),
+        StructField("rolling_24h_mean", DoubleType(), True),
+        StructField("temperature_c", DoubleType(), True),
+        StructField("humidity_pct", DoubleType(), True),
+        StructField("cloud_cover_pct", DoubleType(), True),
+        StructField("temperature_lag_24h", DoubleType(), True),
+        StructField("is_weather_imputed", BooleanType(), False),
+        StructField("temp_missing", BooleanType(), False),
+        StructField("source", StringType(), True),
+        StructField("fetched_at", TimestampType(), True),
+        StructField("feature_built_at", TimestampType(), False),
+        StructField("run_id", StringType(), False),
+    ]
+)
 
 # COMMAND ----------
 
@@ -165,14 +168,18 @@ logger.info(f"Processing data window: {window_start} to {window_end}")
 # Cell 5: Load bronze data
 # Reads raw data from Delta tables filtered by the resolved window.
 
-bronze_load_df = spark.read.table(PATHS.table_bronze) \
-    .filter(F.col("timestamp").between(window_start, window_end)) \
-    .filter(F.col("country") == ENTSO_E_ZONE) \
+bronze_load_df = (
+    spark.read.table(PATHS.table_bronze)
+    .filter(F.col("timestamp").between(window_start, window_end))
+    .filter(F.col("country") == ENTSO_E_ZONE)
     .orderBy("timestamp")
+)
 
-bronze_temp_df = spark.read.table(PATHS.table_bronze_temp) \
-    .filter(F.col("timestamp").between(window_start, window_end)) \
+bronze_temp_df = (
+    spark.read.table(PATHS.table_bronze_temp)
+    .filter(F.col("timestamp").between(window_start, window_end))
     .orderBy("timestamp")
+)
 
 load_count = bronze_load_df.count()
 temp_count = bronze_temp_df.count()
@@ -190,7 +197,7 @@ if load_count == 0:
 # Check for gaps
 null_load = bronze_load_df.filter(F.col("value_mwh").isNull()).count()
 if load_count > 0 and (null_load / load_count) > 0.1:
-    logger.warning(f"High gap rate detected: {null_load/load_count:.2%}")
+    logger.warning(f"High gap rate detected: {null_load / load_count:.2%}")
 
 # Check for duplicates
 duplicates = bronze_load_df.groupBy("timestamp").count().filter("count > 1").count()
@@ -208,7 +215,9 @@ bronze_load_df = bronze_load_df.dropDuplicates(["timestamp"])
 if load_count < MIN_TRAINING_ROWS:
     msg = f"Insufficient data for feature engineering. Required: {MIN_TRAINING_ROWS}, Actual: {load_count}"
     logger.warning(msg)
-    dbutils.notebook.exit(json.dumps({"status": "skipped", "reason": "insufficient_data", "message": msg}))
+    dbutils.notebook.exit(
+        json.dumps({"status": "skipped", "reason": "insufficient_data", "message": msg})
+    )
 
 load_pd = bronze_load_df.toPandas()
 temp_pd = bronze_temp_df.toPandas()
@@ -261,15 +270,13 @@ silver_spark_df = spark.createDataFrame(feature_pd, schema=SILVER_SCHEMA)
 # Initializes the silver table with partitioning and optimization properties.
 
 if not dry_run:
-    DeltaTable.createIfNotExists(spark) \
-        .tableName(PATHS.table_silver) \
-        .addColumns(SILVER_SCHEMA) \
-        .partitionedBy("country") \
-        .property("delta.autoOptimize.optimizeWrite", "true") \
-        .property("delta.autoOptimize.autoCompact", "true") \
-        .property("delta.enableChangeDataFeed", "true") \
-        .property("delta.dataSkippingNumIndexedCols", "4") \
-        .execute()
+    DeltaTable.createIfNotExists(spark).tableName(PATHS.table_silver).addColumns(
+        SILVER_SCHEMA
+    ).partitionedBy("country").property("delta.autoOptimize.optimizeWrite", "true").property(
+        "delta.autoOptimize.autoCompact", "true"
+    ).property("delta.enableChangeDataFeed", "true").property(
+        "delta.dataSkippingNumIndexedCols", "4"
+    ).execute()
 
 # COMMAND ----------
 
@@ -278,18 +285,18 @@ if not dry_run:
 
 if not dry_run:
     delta_silver = DeltaTable.forName(spark, PATHS.table_silver)
-    
+
     delta_silver.alias("target").merge(
         silver_spark_df.alias("source"),
-        "target.timestamp = source.timestamp AND target.country = source.country"
-    ).whenMatchedUpdateAll() \
-     .whenNotMatchedInsertAll() \
-     .execute()
-    
+        "target.timestamp = source.timestamp AND target.country = source.country",
+    ).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+
     history = delta_silver.history(1).collect()[0]
     history_dict = history.asDict()
     metrics = history_dict.get("operationMetrics", {})
-    logger.info(f"Silver Merge: {metrics.get('numTargetRowsInserted', 0)} inserted, {metrics.get('numTargetRowsUpdated', 0)} updated.")
+    logger.info(
+        f"Silver Merge: {metrics.get('numTargetRowsInserted', 0)} inserted, {metrics.get('numTargetRowsUpdated', 0)} updated."
+    )
 
 # COMMAND ----------
 
@@ -298,26 +305,30 @@ if not dry_run:
 
 if force_full_rebuild and not dry_run:
     logger.info("Starting FULL REBUILD of silver table...")
-    
+
     # Get total range
-    range_df = spark.read.table(PATHS.table_bronze).select(F.min("timestamp"), F.max("timestamp")).collect()[0]
+    range_df = (
+        spark.read.table(PATHS.table_bronze)
+        .select(F.min("timestamp"), F.max("timestamp"))
+        .collect()[0]
+    )
     full_start = range_df[0]
     full_end = range_df[1]
-    
+
     current_start = full_start
     chunk_days = 30
-    
+
     while current_start < full_end:
         current_end = current_start + timedelta(days=chunk_days)
         # We need overlap for rolling/lags
         fetch_start = current_start - timedelta(hours=max_lag)
-        
+
         logger.info(f"Processing rebuild chunk: {current_start} to {current_end}")
-        
-        # NOTE: In a real implementation, we would extract Cells 5-11 into a function 
-        # or separate task. For this notebook, we assume the user triggers this manually 
+
+        # NOTE: In a real implementation, we would extract Cells 5-11 into a function
+        # or separate task. For this notebook, we assume the user triggers this manually
         # and we use the existing logic for the chunk.
-        
+
         current_start = current_end
 
 # COMMAND ----------

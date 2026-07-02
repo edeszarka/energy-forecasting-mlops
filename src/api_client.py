@@ -37,17 +37,22 @@ from src.config import (
 
 logger = logging.getLogger(__name__)
 
+
 class EntsoEParseError(Exception):
     """Raised when ENTSO-E XML response cannot be parsed."""
+
     def __init__(self, message: str, xml_text: str) -> None:
         # Avoid logging the securityToken if it happens to be in the XML (unlikely but safe)
         safe_xml = xml_text[:200].replace("securityToken=", "token=***")
         super().__init__(f"{message}. Preview: {safe_xml}")
 
+
 class OpenMeteoParseError(Exception):
     """Raised when OpenMeteo JSON response cannot be parsed."""
+
     def __init__(self, message: str, json_text: str) -> None:
         super().__init__(f"{message}. Preview: {json_text[:200]}")
+
 
 def build_retry_session() -> requests.Session:
     """Creates a requests session with exponential backoff retries."""
@@ -56,12 +61,13 @@ def build_retry_session() -> requests.Session:
         total=HTTP_MAX_RETRIES,
         backoff_factor=HTTP_BACKOFF_FACTOR,
         status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"]
+        allowed_methods=["GET"],
     )
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
+
 
 class EntsoEClient:
     """Client for the ENTSO-E Transparency Platform API."""
@@ -69,17 +75,19 @@ class EntsoEClient:
     def __init__(self, api_key: str | None = None) -> None:
         """
         Initializes the client.
-        
+
         Args:
             api_key: Optional API key. If not provided, reads from environment.
-            
+
         Raises:
             ValueError: If no API key is found.
         """
         self.api_key = api_key or os.environ.get(ENV_ENTSO_E_API_KEY)
         if not self.api_key:
-            raise ValueError(f"ENTSO-E API key must be provided via param or {ENV_ENTSO_E_API_KEY} env var.")
-        
+            raise ValueError(
+                f"ENTSO-E API key must be provided via param or {ENV_ENTSO_E_API_KEY} env var."
+            )
+
         self.session = build_retry_session()
 
     def fetch_actual_load(
@@ -90,15 +98,15 @@ class EntsoEClient:
     ) -> pd.DataFrame:
         """
         Fetch actual total load for the given UTC time range.
-        
+
         Args:
             start: Start datetime (UTC).
             end: End datetime (UTC).
             zone: Bidding zone domain code.
-            
+
         Returns:
             DataFrame with columns: timestamp, value_mwh, country, source, fetched_at.
-            
+
         Raises:
             ValueError: On invalid range.
             requests.HTTPError: On API failure.
@@ -106,7 +114,7 @@ class EntsoEClient:
         """
         if end <= start:
             raise ValueError("End time must be after start time.")
-        
+
         if (end - start).days > ENTSO_E_MAX_RANGE_DAYS:
             raise ValueError(f"Range exceeds maximum of {ENTSO_E_MAX_RANGE_DAYS} days.")
 
@@ -118,12 +126,12 @@ class EntsoEClient:
             "outBiddingZone_Domain": zone,
             "periodStart": start.strftime(fmt),
             "periodEnd": end.strftime(fmt),
-            "securityToken": self.api_key
+            "securityToken": self.api_key,
         }
 
         logger.info("Fetching ENTSO-E load from %s to %s", start, end)
         response = self.session.get(ENTSO_E_BASE_URL, params=params, timeout=HTTP_TIMEOUT_SECONDS)
-        
+
         # Guard against secrets in logs/errors
         try:
             response.raise_for_status()
@@ -145,10 +153,10 @@ class EntsoEClient:
         df["country"] = zone
         df["source"] = "entsoe_api"
         df["fetched_at"] = pd.Timestamp.now(tz="UTC")
-        
+
         # Deduplicate and sort
         df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
-        
+
         logger.info("Successfully fetched %d load records", len(df))
         return df
 
@@ -169,18 +177,20 @@ class EntsoEClient:
             period = ts.find(f"{namespace}Period")
             if period is None:
                 continue
-            
-            start_str = period.find(f"{namespace}timeInterval/{namespace}start").text # type: ignore
+
+            start_str = period.find(f"{namespace}timeInterval/{namespace}start").text  # type: ignore
             period_start = pd.to_datetime(start_str).tz_convert("UTC")
-            
+
             # Resolution is typically PT60M for hourly
-            resolution = period.find(f"{namespace}resolution").text # type: ignore
+            resolution = period.find(f"{namespace}resolution").text  # type: ignore
             if resolution != "PT60M":
                 logger.warning("Unexpected resolution: %s. Expected PT60M.", resolution)
 
-            points = {int(p.find(f"{namespace}position").text): float(p.find(f"{namespace}quantity").text) # type: ignore
-                      for p in period.findall(f"{namespace}Point")}
-            
+            points = {
+                int(p.find(f"{namespace}position").text): float(p.find(f"{namespace}quantity").text)  # type: ignore
+                for p in period.findall(f"{namespace}Point")
+            }
+
             if not points:
                 continue
 
@@ -188,16 +198,16 @@ class EntsoEClient:
             max_pos = max(points.keys())
             for pos in range(1, max_pos + 1):
                 val = points.get(pos)
-                rows.append({
-                    "timestamp": period_start + timedelta(hours=pos - 1),
-                    "value_mwh": val
-                })
+                rows.append(
+                    {"timestamp": period_start + timedelta(hours=pos - 1), "value_mwh": val}
+                )
 
         return rows
 
     def _empty_load_df(self) -> pd.DataFrame:
         """Returns an empty DataFrame with the expected schema."""
         return pd.DataFrame(columns=["timestamp", "value_mwh", "country", "source", "fetched_at"])
+
 
 class OpenMeteoClient:
     """Client for the OpenMeteo Forecast API."""
@@ -213,21 +223,21 @@ class OpenMeteoClient:
     ) -> pd.DataFrame:
         """
         Fetch hourly temperature, humidity, and cloud cover for Budapest.
-        
+
         Args:
             start_date: Start date.
             end_date: End date.
-            
+
         Returns:
             DataFrame with weather metrics.
         """
-        params = {
+        params: dict[str, str | float] = {
             "latitude": OPENMETEO_LAT,
             "longitude": OPENMETEO_LON,
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "hourly": "temperature_2m,relative_humidity_2m,cloud_cover",
-            "timezone": OPENMETEO_TIMEZONE
+            "timezone": OPENMETEO_TIMEZONE,
         }
 
         logger.info("Fetching OpenMeteo weather from %s to %s", start_date, end_date)
@@ -238,16 +248,18 @@ class OpenMeteoClient:
         if "hourly" not in data or "temperature_2m" not in data["hourly"]:
             raise OpenMeteoParseError("Unexpected JSON schema", response.text)
 
-        df = pd.DataFrame({
-            "timestamp": pd.to_datetime(data["hourly"]["time"]),
-            "temperature_c": data["hourly"]["temperature_2m"],
-            "humidity_pct": data["hourly"].get("relative_humidity_2m"),
-            "cloud_cover_pct": data["hourly"].get("cloud_cover")
-        })
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(data["hourly"]["time"]),
+                "temperature_c": data["hourly"]["temperature_2m"],
+                "humidity_pct": data["hourly"].get("relative_humidity_2m"),
+                "cloud_cover_pct": data["hourly"].get("cloud_cover"),
+            }
+        )
 
         # OpenMeteo returns timestamps in the requested timezone. Convert to UTC.
         df["timestamp"] = df["timestamp"].dt.tz_localize(OPENMETEO_TIMEZONE).dt.tz_convert("UTC")
-        
+
         df["source"] = "openmeteo"
         df["fetched_at"] = pd.Timestamp.now(tz="UTC")
 
@@ -267,10 +279,9 @@ class OpenMeteoClient:
         df["is_weather_imputed"] = df[columns].isna().any(axis=1)
         for col in columns:
             # 72-hour rolling window, minimum 1 period to fill as much as possible
-            df[col] = df[col].fillna(
-                df[col].rolling(window=72, min_periods=1, center=True).mean()
-            )
+            df[col] = df[col].fillna(df[col].rolling(window=72, min_periods=1, center=True).mean())
         return df
+
 
 def fetch_all(
     start: datetime,
@@ -279,12 +290,12 @@ def fetch_all(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Convenience wrapper to fetch both load and temperature.
-    
+
     Args:
         start: Start datetime (UTC).
         end: End datetime (UTC).
         api_key: ENTSO-E API key.
-        
+
     Returns:
         Tuple of (load_df, temperature_df).
     """
