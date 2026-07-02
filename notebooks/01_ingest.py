@@ -136,7 +136,7 @@ TEMPERATURE_BRONZE_SCHEMA = StructType(
         StructField("temperature_c", DoubleType(), True),
         StructField("humidity_pct", DoubleType(), True),
         StructField("cloud_cover_pct", DoubleType(), True),
-        StructField("is_temp_imputed", BooleanType(), False),
+        StructField("is_weather_imputed", BooleanType(), False),
         StructField("source", StringType(), False),
         StructField("fetched_at", TimestampType(), False),
     ]
@@ -254,7 +254,7 @@ temp_processed_df = (
     temp_raw_df.filter(F.col("timestamp").isNotNull())
     .dropDuplicates(["timestamp"])
     .withColumn("run_id", F.lit(run_id))
-    .fillna({"is_temp_imputed": False})
+    .fillna({"is_weather_imputed": False})
 )
 
 # COMMAND ----------
@@ -315,10 +315,10 @@ if not dry_run and not temp_processed_df.isEmpty():
     delta_temp.alias("target").merge(
         temp_processed_df.alias("source"), "target.timestamp = source.timestamp"
     ).whenMatchedUpdate(
-        condition="source.is_temp_imputed = false",
+        condition="source.is_weather_imputed = false",
         set={
             "temperature_c": "source.temperature_c",
-            "is_temp_imputed": "source.is_temp_imputed",
+            "is_weather_imputed": "source.is_weather_imputed",
             "source": "source.source",
             "fetched_at": "source.fetched_at",
             "run_id": "source.run_id",

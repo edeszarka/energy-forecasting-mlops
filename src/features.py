@@ -30,23 +30,30 @@ from src.config import FIXED_HOLIDAYS, LAG_HOURS, MIN_TRAINING_ROWS
 
 logger = logging.getLogger(__name__)
 
+
 def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Adds calendar-based features derived from the timestamp.
-    
+
     Args:
         df: Input DataFrame with 'timestamp' column (tz-aware UTC).
-        
+
     Returns:
         DataFrame with new calendar columns.
-    
+
     Raises:
         ValueError: If timestamp is timezone-naive.
     """
     if df.empty:
         cols = [
-            "hour_of_day", "day_of_week", "month", "quarter", 
-            "is_weekend", "is_holiday", "is_holiday_eve", "days_since_epoch"
+            "hour_of_day",
+            "day_of_week",
+            "month",
+            "quarter",
+            "is_weekend",
+            "is_holiday",
+            "is_holiday_eve",
+            "days_since_epoch",
         ]
         return df.assign(**{col: [] for col in cols})
 
@@ -54,21 +61,21 @@ def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("The 'timestamp' column must be timezone-aware (UTC).")
 
     df = df.copy()
-    
+
     # Convert to local Budapest time for accurate hour/holiday features
     local_ts = df["timestamp"].dt.tz_convert("Europe/Budapest")
-    
+
     df["hour_of_day"] = local_ts.dt.hour
     df["day_of_week"] = local_ts.dt.dayofweek
     df["month"] = local_ts.dt.month
     df["quarter"] = local_ts.dt.quarter
     df["is_weekend"] = df["day_of_week"] >= 5
-    
+
     # Hungarian Holidays (Moveable)
     min_year = local_ts.dt.year.min()
     max_year = local_ts.dt.year.max()
     hu_holidays = holidays.country_holidays("HU", years=range(min_year, max_year + 1))
-    
+
     # Fixed Holidays from config
     def check_is_holiday(row: pd.Timestamp) -> bool:
         # Check moveable
@@ -79,31 +86,32 @@ def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
         return row.day in fixed
 
     df["is_holiday"] = local_ts.apply(check_is_holiday).astype(bool)
-    
+
     # Holiday Eve (Day before holiday or weekend)
     # We use shift(-1) on the sorted local timestamps to see if tomorrow is a holiday
     df_sorted = df.sort_values("timestamp")
-    
+
     # Fix FutureWarning: set option to opt-in to future behavior
     pd.set_option("future.no_silent_downcasting", True)
-    
+
     tomorrow_is_holiday = df_sorted["is_holiday"].shift(-1).fillna(False)
     tomorrow_is_weekend = (df_sorted["day_of_week"].shift(-1) >= 5).fillna(False)
     df["is_holiday_eve"] = tomorrow_is_holiday | tomorrow_is_weekend
-    
+
     # Trend feature: Days since a fixed baseline
     baseline = pd.Timestamp("2015-01-01", tz="UTC")
     df["days_since_epoch"] = (df["timestamp"] - baseline).dt.days
-    
+
     return df
+
 
 def add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Adds historical lag features for the target variable 'value_mwh'.
-    
+
     Args:
         df: Input DataFrame sorted by timestamp.
-        
+
     Returns:
         DataFrame with lag columns and gap flags.
     """
@@ -112,39 +120,37 @@ def add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
         return df.assign(**{col: [] for col in cols})
 
     df = df.sort_values("timestamp").copy()
-    
+
     # Ensure complete hourly index to prevent shift() misalignment
     full_range = pd.date_range(
-        start=df["timestamp"].min(),
-        end=df["timestamp"].max(),
-        freq="h",
-        tz="UTC"
+        start=df["timestamp"].min(), end=df["timestamp"].max(), freq="h", tz="UTC"
     )
-    
+
     # Identify original timestamps to drop reindex-only rows later
     original_timestamps = set(df["timestamp"])
-    
+
     df = df.set_index("timestamp").reindex(full_range)
-    
+
     for lag_h in LAG_HOURS:
         df[f"lag_{lag_h}h"] = df["value_mwh"].shift(lag_h)
-        
+
     lag_cols = [f"lag_{h}h" for h in LAG_HOURS]
     df["has_lag_gap"] = df[lag_cols].isna().any(axis=1)
-    
+
     # Restore original rows only
     df = df.reset_index().rename(columns={"index": "timestamp"})
     df = df[df["timestamp"].isin(original_timestamps)]
-    
+
     return df
+
 
 def add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Adds rolling window statistics for the target variable.
-    
+
     Args:
         df: Input DataFrame sorted by timestamp.
-        
+
     Returns:
         DataFrame with rolling columns.
     """
@@ -153,28 +159,29 @@ def add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
         return df.assign(**{col: [] for col in cols})
 
     df = df.sort_values("timestamp").copy()
-    
+
     # 7-day (168h) rolling statistics
     df["rolling_7d_mean"] = df["value_mwh"].rolling(window=168, min_periods=72).mean()
     df["rolling_7d_std"] = df["value_mwh"].rolling(window=168, min_periods=72).std()
-    
+
     # 24-hour rolling mean
     df["rolling_24h_mean"] = df["value_mwh"].rolling(window=24, min_periods=12).mean()
-    
+
     return df
+
 
 def _fill_missing_weather(df: pd.DataFrame) -> pd.DataFrame:
     """
     Private helper to impute missing weather data for all columns.
     """
     df = df.copy()
-    
+
     weather_cols = ["temperature_c", "humidity_pct", "cloud_cover_pct"]
-    
+
     # Track which rows were missing before filling
     missing_before = df[weather_cols].isna()
     df["temp_missing"] = df["temperature_c"].isna()
-    
+
     for col in weather_cols:
         if col not in df.columns:
             continue
@@ -183,19 +190,18 @@ def _fill_missing_weather(df: pd.DataFrame) -> pd.DataFrame:
         # Step 2: Backward-fill short gaps (up to 3h)
         df[col] = df[col].bfill(limit=3)
         # Step 3: 72h rolling mean for remaining NaN
-        df[col] = df[col].fillna(
-            df[col].rolling(window=72, min_periods=1, center=True).mean()
-        )
-    
-    # Update is_temp_imputed flag
-    if "is_temp_imputed" not in df.columns:
-        df["is_temp_imputed"] = False
+        df[col] = df[col].fillna(df[col].rolling(window=72, min_periods=1, center=True).mean())
+
+    # Update is_weather_imputed flag
+    if "is_weather_imputed" not in df.columns:
+        df["is_weather_imputed"] = False
 
     # Mark as imputed if any weather column was missing but is now filled
     was_filled = (missing_before & df[weather_cols].notna()).any(axis=1)
-    df["is_temp_imputed"] = df["is_temp_imputed"] | was_filled
-    
+    df["is_weather_imputed"] = df["is_weather_imputed"] | was_filled
+
     return df
+
 
 def add_weather_features(
     df: pd.DataFrame,
@@ -210,12 +216,18 @@ def add_weather_features(
         df["humidity_pct"] = np.nan
         df["cloud_cover_pct"] = np.nan
         df["temperature_lag_24h"] = np.nan
-        df["is_temp_imputed"] = False
+        df["is_weather_imputed"] = False
         df["temp_missing"] = True
         return df
 
     # Select only the columns that exist in weather_df
-    weather_cols = ["timestamp", "temperature_c", "humidity_pct", "cloud_cover_pct", "is_temp_imputed"]
+    weather_cols = [
+        "timestamp",
+        "temperature_c",
+        "humidity_pct",
+        "cloud_cover_pct",
+        "is_weather_imputed",
+    ]
     available = [c for c in weather_cols if c in weather_df.columns]
 
     df = pd.merge(df, weather_df[available], on="timestamp", how="left")
@@ -223,16 +235,17 @@ def add_weather_features(
     # Create any missing weather columns as NaN
     for col in weather_cols:
         if col not in df.columns:
-            df[col] = np.nan if col != "is_temp_imputed" else False
-    
+            df[col] = np.nan if col != "is_weather_imputed" else False
+
     # Impute missing values
     df = _fill_missing_weather(df)
-    
+
     # Add temperature lag
     df = df.sort_values("timestamp")
     df["temperature_lag_24h"] = df["temperature_c"].shift(24)
-    
+
     return df
+
 
 def build_feature_matrix(
     load_df: pd.DataFrame,
@@ -240,14 +253,14 @@ def build_feature_matrix(
 ) -> pd.DataFrame:
     """
     Orchestrates the creation of the full feature matrix.
-    
+
     Args:
         load_df: Raw load data.
         weather_df: Raw weather data.
-        
+
     Returns:
         Complete feature matrix.
-        
+
     Raises:
         ValueError: If load_df has insufficient data.
     """
@@ -256,32 +269,48 @@ def build_feature_matrix(
             f"Insufficient data for feature engineering. "
             f"Required: {MIN_TRAINING_ROWS}, Actual: {len(load_df)}"
         )
-    
+
     # Validate required columns
     required_cols = {"timestamp", "value_mwh"}
     if not required_cols.issubset(load_df.columns):
-        raise ValueError(f"load_df missing required columns: {required_cols - set(load_df.columns)}")
+        raise ValueError(
+            f"load_df missing required columns: {required_cols - set(load_df.columns)}"
+        )
 
     # Process features in order
     df = add_calendar_features(load_df)
     df = add_lag_features(df)
     df = add_rolling_features(df)
     df = add_weather_features(df, weather_df)
-    
+
     # Final cleanup
     df = df.sort_values("timestamp").reset_index(drop=True)
     df["feature_built_at"] = pd.Timestamp.now(tz="UTC")
-    
+
     return df
+
 
 def get_feature_columns() -> list[str]:
     """
     Returns the canonical list of feature columns used as model input.
     """
     return [
-        "hour_of_day", "day_of_week", "month", "quarter",
-        "is_weekend", "is_holiday", "is_holiday_eve", "days_since_epoch",
-        "lag_24h", "lag_48h", "lag_168h",
-        "rolling_7d_mean", "rolling_7d_std", "rolling_24h_mean",
-        "temperature_c", "temperature_lag_24h", "humidity_pct", "cloud_cover_pct",
+        "hour_of_day",
+        "day_of_week",
+        "month",
+        "quarter",
+        "is_weekend",
+        "is_holiday",
+        "is_holiday_eve",
+        "days_since_epoch",
+        "lag_24h",
+        "lag_48h",
+        "lag_168h",
+        "rolling_7d_mean",
+        "rolling_7d_std",
+        "rolling_24h_mean",
+        "temperature_c",
+        "temperature_lag_24h",
+        "humidity_pct",
+        "cloud_cover_pct",
     ]
