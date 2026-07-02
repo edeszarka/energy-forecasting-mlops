@@ -111,18 +111,28 @@ TRAIN_TEST_SPLIT_DAYS: Final[int] = 30
 MIN_TRAINING_ROWS: Final[int] = 720
 PROPHET_SEASONALITY_MODE: Final[str] = "multiplicative"
 
+# Default LightGBM hyperparameters (sklearn API names for LGBMRegressor)
+# Used by 06_train_lgbm.py when Optuna tuning is disabled (n_trials=0)
+# Tuned params override individual keys when tuning is active
 LGBM_PARAMS: Final[dict] = {
     "objective": "regression",
     "metric": "mae",
-    "num_leaves": 63,
+    "num_leaves": 64,
     "learning_rate": 0.05,
-    "feature_fraction": 0.8,
-    "bagging_fraction": 0.8,
-    "bagging_freq": 5,
-    "min_child_samples": 20,
     "n_estimators": 500,
-    "early_stopping_rounds": 50,
+    "min_child_samples": 20,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_alpha": 0.1,
+    "reg_lambda": 0.1,
+    "random_state": 42,
     "verbose": -1,
 }
+
+# OPTUNA HYPERPARAMETER OPTIMIZATION
+OPTUNA_N_TRIALS: Final[int] = 25
+OPTUNA_TIMEOUT_SECONDS: Final[int] = 600
+OPTUNA_N_SPLITS: Final[int] = 3          # TimeSeriesSplit folds
+OPTUNA_GAP_HOURS: Final[int] = 168       # 1-week gap between train/test splits
 
 # FIX APPLIED: Corrected table_silver name to silver_features and added missing table constants (drift, gold, eval, promotion, ingestion_log).

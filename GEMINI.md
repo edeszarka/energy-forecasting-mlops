@@ -181,7 +181,14 @@ Since the Model Registry is blocked, we manage the model lifecycle using MLflow 
 - **Loading**: Notebook `04_predict.py` uses `mlflow_client.search_runs()` with `filter_string="tags.production = 'true'"` and `order_by="metrics.mape ASC"` to find the best production model.
 - **Model Type Safety**: During prediction, always use `type(model).__name__` to distinguish between LGBM and Prophet objects to prevent feature count mismatches.
 
+## Optuna Hyperparameter Tuning
+- **Triggered by**: Setting `n_trials > 0` via the widget in `06_train_lgbm.py`.
+- **Search space**: Defined in `src/tuning.py:get_lgbm_search_space()`. Narrow (7 params) to avoid overfitting the CV folds with ~1400 training rows.
+- **Validation**: `TimeSeriesSplit(n_splits=3, gap=168)` — 3 folds with a 1-week gap between train and test to prevent shifted-target leakage.
+- **Integration**: Tuning runs inside the model training MLflow run. Best params override `LGBM_PARAMS` defaults. The final model is trained with tuned params + early stopping. Tuned params are logged with `tuned_` prefix in MLflow metrics.
+- **Default**: `n_trials=25` via `OPTUNA_N_TRIALS` in `src/config.py`. Set to 0 to skip tuning and use `LGBM_PARAMS` directly.
+- **No separate notebook or job task**: Tuning is embedded in `06_train_lgbm.py` and controlled by the widget. This avoids cross-notebook param passing and duplicate data loading.
+
 ## Backlog & Future Improvements
 - **Technical Debt**: Centralize Volume paths in `src/config.py` instead of hardcoding in notebooks.
 - **Robustness**: Implement automated Bronze backfilling triggered directly from the ingestion notebook if data is missing.
-- **Features**: Add humidity and cloud cover to the training set to improve solar/consumption accuracy.
