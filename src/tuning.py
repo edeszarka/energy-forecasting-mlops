@@ -10,13 +10,18 @@ unit-testable without Spark or Databricks dependencies.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 import lightgbm as lgb
 import numpy as np
 import optuna
 import pandas as pd
-from optuna.distributions import BaseDistribution, FloatDistribution, IntDistribution
+from optuna.distributions import (
+    BaseDistribution,
+    CategoricalDistribution,
+    FloatDistribution,
+    IntDistribution,
+)
 from optuna.samplers import TPESampler
 from sklearn.metrics import mean_absolute_error
 
@@ -117,12 +122,14 @@ def objective(
         Mean MAE across CV folds.
     """
     space = get_lgbm_search_space()
-    params = {
+    params: dict[str, Any] = {
         key: trial.suggest_float(key, dist.low, dist.high, log=dist.log)
         if isinstance(dist, FloatDistribution)
         else trial.suggest_int(key, dist.low, dist.high, log=dist.log)
         if isinstance(dist, IntDistribution)
         else trial.suggest_categorical(key, dist.choices)
+        if isinstance(dist, CategoricalDistribution)
+        else trial.suggest_categorical(key, cast(CategoricalDistribution, dist).choices)
         for key, dist in space.items()
     }
 
