@@ -78,7 +78,8 @@ CONFIG = {
         'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
         'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
         'hour_of_day', 'day_of_week', 'month',
-        'is_weekend', 'is_holiday'
+        'is_weekend', 'is_holiday',
+        'humidity_pct', 'cloud_cover_pct',
     ],
     "force_backfill": dbutils.widgets.get("force_backfill").lower() == "true",
     "horizon_hours": dbutils.widgets.get("horizon_hours"),
@@ -200,6 +201,10 @@ def prepare_inference_features(
         proxy_time = t - timedelta(days=7)
         temp_matches = history_pd[history_pd["timestamp"] == proxy_time]["temperature_c"]
         temp_c = temp_matches.iloc[0] if not temp_matches.empty else history_pd["temperature_c"].iloc[-1]
+        hum_matches = history_pd[history_pd["timestamp"] == proxy_time]["humidity_pct"]
+        humidity_pct = hum_matches.iloc[0] if not hum_matches.empty else history_pd["humidity_pct"].iloc[-1]
+        cc_matches = history_pd[history_pd["timestamp"] == proxy_time]["cloud_cover_pct"]
+        cloud_cover_pct = cc_matches.iloc[0] if not cc_matches.empty else history_pd["cloud_cover_pct"].iloc[-1]
         
         def get_lag(target_t):
             match = history_pd[history_pd["timestamp"] == target_t]["value_mwh"]
@@ -208,6 +213,8 @@ def prepare_inference_features(
         row = {
             "timestamp": t,
             "temperature_c": temp_c,
+            "humidity_pct": humidity_pct,
+            "cloud_cover_pct": cloud_cover_pct,
             "lag_24h": get_lag(t - timedelta(hours=24)),
             "lag_48h": get_lag(t - timedelta(hours=48)),
             "lag_168h": get_lag(t - timedelta(hours=168)),
@@ -240,12 +247,13 @@ def generate_forecasts(
     config: dict
 ) -> pd.DataFrame:
     """Inference loop."""
-    # Strict 12-feature list to match training (06_train_lgbm)
+    # Strict feature list to match training (06_train_lgbm)
     MODEL_FEATURES = [
         'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
         'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
         'hour_of_day', 'day_of_week', 'month',
-        'is_weekend', 'is_holiday'
+        'is_weekend', 'is_holiday',
+        'humidity_pct', 'cloud_cover_pct',
     ]
     
     # Force alignment and log for debugging

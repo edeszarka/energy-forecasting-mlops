@@ -56,8 +56,8 @@ from src.config import CATALOG, PATHS
 # COMMAND ----------
 
 # Widgets for configuration
-dbutils.widgets.text("test_days", "30")
-dbutils.widgets.text("min_train_rows", "2000")
+dbutils.widgets.text("test_days", "5")
+dbutils.widgets.text("min_train_rows", "200")
 
 CONFIG = {
     "silver_table": PATHS.table_silver,

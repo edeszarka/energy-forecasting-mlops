@@ -49,8 +49,8 @@ os.environ['MLFLOW_USE_DATABRICKS_SDK_MODEL_ARTIFACTS_REPO_FOR_UC'] = 'True'
 
 # COMMAND ----------
 
-dbutils.widgets.text("test_days", "30")
-dbutils.widgets.text("min_train_rows", "2000")
+dbutils.widgets.text("test_days", "5")
+dbutils.widgets.text("min_train_rows", "200")
 
 CONFIG = {
     "silver_table": PATHS.table_silver,
@@ -62,7 +62,8 @@ FEATURE_COLS = [
     'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h', 
     'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
     'hour_of_day', 'day_of_week', 'month', 
-    'is_weekend', 'is_holiday'
+    'is_weekend', 'is_holiday',
+    'humidity_pct', 'cloud_cover_pct',
 ]
 
 # COMMAND ----------

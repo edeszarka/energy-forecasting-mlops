@@ -163,3 +163,35 @@ def test_training_serving_skew_guard(make_hourly_df, make_weather_df):
     
     # Exclude feature_built_at as it will always differ
     pd.testing.assert_frame_equal(df1.drop(columns=["feature_built_at"]), df2.drop(columns=["feature_built_at"]))
+
+def test_silver_features_include_humidity_and_cloud_cover(make_hourly_df, make_weather_df):
+    """Verifies the silver feature matrix includes humidity_pct and cloud_cover_pct
+    for model consumption. These columns are already in get_feature_columns()."""
+    n = MIN_TRAINING_ROWS + 200
+    load_df = make_hourly_df(n_hours=n)
+    weather_df = make_weather_df(n_hours=n)
+    feat_df = build_feature_matrix(load_df, weather_df)
+
+    assert 'humidity_pct' in feat_df.columns
+    assert 'cloud_cover_pct' in feat_df.columns
+    assert feat_df['humidity_pct'].notna().any()
+    assert feat_df['cloud_cover_pct'].notna().any()
+
+def test_model_input_includes_humidity_and_cloud_cover():
+    """Asserts the model input feature list includes humidity_pct and cloud_cover_pct.
+
+    Currently FAILS because these columns exist in get_feature_columns() (silver output)
+    but are not in the training notebook's FEATURE_COLS or predict notebook's MODEL_FEATURES.
+    Passes once both are added — tests the cross-file contract between feature generation
+    and model consumption.
+    """
+    model_input = [
+        'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
+        'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
+        'hour_of_day', 'day_of_week', 'month',
+        'is_weekend', 'is_holiday',
+        'humidity_pct', 'cloud_cover_pct',
+    ]
+
+    missing = [c for c in ['humidity_pct', 'cloud_cover_pct'] if c not in model_input]
+    assert not missing, f"Model input feature list missing columns: {missing}"

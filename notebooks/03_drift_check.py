@@ -129,7 +129,8 @@ CONFIG = {
     "feature_columns": [
         'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
         'rolling_7d_mean', 'rolling_7d_std', 'hour_of_day',
-        'day_of_week', 'month', 'is_weekend', 'is_holiday'
+        'day_of_week', 'month', 'is_weekend', 'is_holiday',
+        'humidity_pct', 'cloud_cover_pct',
     ],
     "target_column": "value_mwh",
 }
