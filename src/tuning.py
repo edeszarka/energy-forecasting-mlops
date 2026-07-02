@@ -82,12 +82,6 @@ def make_timeseries_splits(
             f"test_size={test_size}. Need at least {min_required} rows, got {n_samples}."
         )
 
-    total_needed = 0
-    for fold in range(n_splits):
-        test_end = n_samples - (n_splits - 1 - fold) * (test_size + gap)
-        test_start = test_end - test_size
-        total_needed = test_start
-
     splits: list[tuple[range, range]] = []
     for fold in range(n_splits):
         # The test fold moves forward each iteration
@@ -151,7 +145,8 @@ def objective(
 
         model = lgb.LGBMRegressor(**params)
         model.fit(
-            X_train_fold, y_train_fold,
+            X_train_fold,
+            y_train_fold,
             eval_set=[(X_test_fold, y_test_fold)],
             callbacks=[lgb.early_stopping(20)],
         )
