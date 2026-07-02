@@ -42,7 +42,7 @@ import pandas as pd
 import shap
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-from src.config import CATALOG, PATHS
+from src.config import CATALOG, MODEL_INPUT_FEATURES, PATHS
 
 # Fix for MLflow model registration in Databricks Unity Catalog
 os.environ['MLFLOW_USE_DATABRICKS_SDK_MODEL_ARTIFACTS_REPO_FOR_UC'] = 'True'
@@ -58,13 +58,7 @@ CONFIG = {
     "min_train_rows": int(dbutils.widgets.get("min_train_rows")),
 }
 
-FEATURE_COLS = [
-    'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h', 
-    'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
-    'hour_of_day', 'day_of_week', 'month', 
-    'is_weekend', 'is_holiday',
-    'humidity_pct', 'cloud_cover_pct',
-]
+FEATURE_COLS = MODEL_INPUT_FEATURES  # sourced from src/config.py
 
 # COMMAND ----------
 

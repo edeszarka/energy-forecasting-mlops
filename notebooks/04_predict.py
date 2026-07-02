@@ -56,7 +56,7 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-from src.config import CATALOG, PATHS
+from src.config import CATALOG, MODEL_INPUT_FEATURES, PATHS
 
 # COMMAND ----------
 
@@ -74,13 +74,6 @@ except Exception:
 CONFIG = {
     "silver_table": PATHS.table_silver,
     "forecast_table": PATHS.table_gold,
-    "feature_columns": [
-        'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
-        'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
-        'hour_of_day', 'day_of_week', 'month',
-        'is_weekend', 'is_holiday',
-        'humidity_pct', 'cloud_cover_pct',
-    ],
     "force_backfill": dbutils.widgets.get("force_backfill").lower() == "true",
     "horizon_hours": dbutils.widgets.get("horizon_hours"),
     "pipeline_run_id": pipeline_run_id
@@ -247,14 +240,8 @@ def generate_forecasts(
     config: dict
 ) -> pd.DataFrame:
     """Inference loop."""
-    # Strict feature list to match training (06_train_lgbm)
-    MODEL_FEATURES = [
-        'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
-        'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
-        'hour_of_day', 'day_of_week', 'month',
-        'is_weekend', 'is_holiday',
-        'humidity_pct', 'cloud_cover_pct',
-    ]
+    # Sourced from src/config.py — keep in sync with 06_train_lgbm.py
+    MODEL_FEATURES = MODEL_INPUT_FEATURES
     
     # Force alignment and log for debugging
     X = features_df[MODEL_FEATURES].copy()

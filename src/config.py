@@ -78,6 +78,17 @@ ROLLING_WINDOW_DAYS: Final[int] = 7
 FORECAST_HORIZON_24H: Final[int] = 24
 FORECAST_HORIZON_7D: Final[int] = 168
 
+# Single source of truth for model input columns
+# Used by: 06_train_lgbm.py, 04_predict.py, 03_drift_check.py
+# If you add a feature here, update src/features.py:get_feature_columns() too
+MODEL_INPUT_FEATURES: Final[list[str]] = [
+    'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
+    'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
+    'hour_of_day', 'day_of_week', 'month',
+    'is_weekend', 'is_holiday',
+    'humidity_pct', 'cloud_cover_pct',
+]
+
 # DRIFT MONITORING THRESHOLDS
 DRIFT_SCORE_THRESHOLD: Final[float] = 0.15   # Jensen-Shannon divergence
 DRIFT_CONSECUTIVE_HOURS: Final[int] = 3      # Trigger retraining

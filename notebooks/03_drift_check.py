@@ -102,7 +102,7 @@ root_path = str(Path(os.getcwd()).parent)
 if root_path not in sys.path:
     sys.path.append(root_path)
 
-from src.config import PATHS, RETRAIN_FLAG_PATH, SCHEMA
+from src.config import MODEL_INPUT_FEATURES, PATHS, RETRAIN_FLAG_PATH, SCHEMA
 
 # COMMAND ----------
 
@@ -126,12 +126,7 @@ CONFIG = {
     "current_window_days": int(dbutils.widgets.get("current_window_days")),
     "min_rows_for_drift": int(dbutils.widgets.get("min_rows_for_drift")),
     "primary_model_name": "energy_lgbm_24h",
-    "feature_columns": [
-        'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
-        'rolling_7d_mean', 'rolling_7d_std', 'hour_of_day',
-        'day_of_week', 'month', 'is_weekend', 'is_holiday',
-        'humidity_pct', 'cloud_cover_pct',
-    ],
+    "feature_columns": MODEL_INPUT_FEATURES,  # sourced from src/config.py
     "target_column": "value_mwh",
 }
 

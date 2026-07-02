@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.config import MIN_TRAINING_ROWS
+from src.config import MIN_TRAINING_ROWS, MODEL_INPUT_FEATURES
 from src.features import (
     add_calendar_features,
     add_lag_features,
@@ -185,13 +185,5 @@ def test_model_input_includes_humidity_and_cloud_cover():
     Passes once both are added — tests the cross-file contract between feature generation
     and model consumption.
     """
-    model_input = [
-        'temperature_c', 'lag_24h', 'lag_48h', 'lag_168h',
-        'rolling_7d_mean', 'rolling_7d_std', 'rolling_24h_mean',
-        'hour_of_day', 'day_of_week', 'month',
-        'is_weekend', 'is_holiday',
-        'humidity_pct', 'cloud_cover_pct',
-    ]
-
-    missing = [c for c in ['humidity_pct', 'cloud_cover_pct'] if c not in model_input]
+    missing = [c for c in ['humidity_pct', 'cloud_cover_pct'] if c not in MODEL_INPUT_FEATURES]
     assert not missing, f"Model input feature list missing columns: {missing}"
