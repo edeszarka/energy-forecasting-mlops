@@ -279,6 +279,19 @@ def generate_forecasts(
 
     # Force alignment and log for debugging
     X = features_df[MODEL_FEATURES].copy()
+
+    # Subset to features the loaded model actually expects (handles
+    # old models trained before humidity_pct/cloud_cover_pct were added)
+    if "lgbm" in model_name and hasattr(model, "booster_"):
+        trained_features = model.booster_.feature_name()
+        missing = [c for c in trained_features if c not in X.columns]
+        extra = [c for c in X.columns if c not in trained_features]
+        if missing:
+            logger.warning(f"Model expects features missing from input: {missing}")
+        if extra:
+            logger.info(f"Dropping {len(extra)} features not in training set: {extra}")
+        X = X[[c for c in trained_features if c in X.columns]]
+
     logger.info(f"Model Input: {X.shape[1]} features. Columns: {list(X.columns)}")
 
     if "lgbm" in model_name:

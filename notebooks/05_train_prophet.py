@@ -42,7 +42,7 @@ from mlflow.models import infer_signature
 from prophet import Prophet
 
 # Fix for MLflow model registration in Databricks Unity Catalog
-os.environ['MLFLOW_USE_DATABRICKS_SDK_MODEL_ARTIFACTS_REPO_FOR_UC'] = 'True'
+os.environ["MLFLOW_USE_DATABRICKS_SDK_MODEL_ARTIFACTS_REPO_FOR_UC"] = "True"
 
 if tuple(int(x) for x in cmdstanpy.__version__.split(".")[:2]) >= (1, 2):
     raise ImportError(
@@ -73,6 +73,7 @@ logger = logging.getLogger("05_train_prophet")
 
 # COMMAND ----------
 
+
 def calculate_mape(actual: pd.Series, predicted: pd.Series) -> float:
     """Computes MAPE guarding against division by zero."""
     mask = actual != 0
@@ -80,17 +81,20 @@ def calculate_mape(actual: pd.Series, predicted: pd.Series) -> float:
         return 0.0
     return np.mean(np.abs((actual[mask] - predicted[mask]) / actual[mask])) * 100
 
+
 def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
     """Trains a Prophet model for a specific horizon and logs to MLflow."""
-    
+
     # Split data
-    split_date = df['ds'].max() - pd.Timedelta(days=CONFIG["test_days"])
-    train_df = df[df['ds'] <= split_date].copy()
-    test_df = df[df['ds'] > split_date].copy()
-    
+    split_date = df["ds"].max() - pd.Timedelta(days=CONFIG["test_days"])
+    train_df = df[df["ds"] <= split_date].copy()
+    test_df = df[df["ds"] > split_date].copy()
+
     if len(train_df) < CONFIG["min_train_rows"]:
-        raise ValueError(f"Insufficient training data for {model_name}. Need {CONFIG['min_train_rows']}, got {len(train_df)}")
-    
+        raise ValueError(
+            f"Insufficient training data for {model_name}. Need {CONFIG['min_train_rows']}, got {len(train_df)}"
+        )
+
     with mlflow.start_run(run_name=f"prophet_{horizon_hours}h", nested=True) as run:
         # Define model
         model = Prophet(
@@ -98,57 +102,63 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
             weekly_seasonality=True,
             daily_seasonality=True,
             changepoint_prior_scale=0.05,
-            seasonality_mode='multiplicative'
+            seasonality_mode="multiplicative",
         )
-        model.add_regressor('temperature_c')
-        
+        model.add_regressor("temperature_c")
+
         # Fit
         logger.info(f"Fitting Prophet model for {horizon_hours}h horizon...")
         model.fit(train_df)
-        
+
         # Evaluate on test set
-        forecast = model.predict(test_df[['ds', 'temperature_c']])
-        
+        forecast = model.predict(test_df[["ds", "temperature_c"]])
+
         # Metrics
-        y_true = test_df['y'].values
-        y_pred = forecast['yhat'].values
-        
+        y_true = test_df["y"].values
+        y_pred = forecast["yhat"].values
+
         mae = np.mean(np.abs(y_true - y_pred))
-        rmse = np.sqrt(np.mean((y_true - y_pred)**2))
+        rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
         mape = calculate_mape(pd.Series(y_true), pd.Series(y_pred))
-        
+
         # Log params and metrics
-        mlflow.log_params({
-            "changepoint_prior_scale": 0.05,
-            "seasonality_mode": "multiplicative",
-            "horizon_hours": horizon_hours,
-            "n_train": len(train_df),
-            "n_test": len(test_df)
-        })
+        mlflow.log_params(
+            {
+                "changepoint_prior_scale": 0.05,
+                "seasonality_mode": "multiplicative",
+                "horizon_hours": horizon_hours,
+                "n_train": len(train_df),
+                "n_test": len(test_df),
+            }
+        )
         mlflow.log_metrics({"mae": mae, "rmse": rmse, "mape": mape})
-        
+
         # Reference Window Metadata
-        training_data_end = train_df['ds'].max()
-        training_data_start = train_df['ds'].min()
-        mlflow.set_tag("model_name", model_name) # Added for discovery
+        training_data_end = train_df["ds"].max()
+        training_data_start = train_df["ds"].min()
+        mlflow.set_tag("model_name", model_name)  # Added for discovery
         mlflow.set_tag("training_data_end", training_data_end.isoformat())
         mlflow.set_tag("training_data_start", training_data_start.isoformat())
 
         # Log model (This works as it logs to the tracking server)
         signature = infer_signature(
-            model_input=test_df[['ds', 'temperature_c']],
-            model_output=forecast[['yhat']],
+            model_input=test_df[["ds", "temperature_c"]],
+            model_output=forecast[["yhat"]],
         )
         mlflow.prophet.log_model(model, artifact_path="model", signature=signature)
-        
+
         logger.info(f"Model {model_name} trained and logged to run {run.info.run_id}")
-        
+
         return {
             "run_id": run.info.run_id,  # Return run_id so we can find it later
             "model_name": model_name,
-            "mae": mae, "rmse": rmse, "mape": mape,
-            "n_train": len(train_df), "n_test": len(test_df)
+            "mae": mae,
+            "rmse": rmse,
+            "mape": mape,
+            "n_train": len(train_df),
+            "n_test": len(test_df),
         }
+
 
 # COMMAND ----------
 
@@ -156,7 +166,8 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
 spark.sql(f"USE CATALOG {CATALOG}")
 pdf = spark.read.table(CONFIG["silver_table"]).filter(F.col("value_mwh").isNotNull()).toPandas()
 pdf = pdf.rename(columns={"timestamp": "ds", "value_mwh": "y"})
-pdf['ds'] = pd.to_datetime(pdf['ds']).dt.tz_localize(None)
+pdf["ds"] = pd.to_datetime(pdf["ds"]).dt.tz_localize(None)
+pdf = pdf.dropna(subset=["temperature_c"])
 
 results = []
 parent_run_name = f"prophet_training_{datetime.now(UTC).strftime('%Y%m%d_%H%M')}"
