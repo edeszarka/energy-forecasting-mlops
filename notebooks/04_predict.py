@@ -378,7 +378,6 @@ def backfill_actuals(spark, config: dict) -> int:
     ON target.timestamp = source.timestamp
     AND target.actual_mwh IS NULL
     AND source.value_mwh IS NOT NULL
-    AND target.forecast_run_at >= (current_timestamp() - INTERVAL 30 DAYS)
     WHEN MATCHED THEN UPDATE SET target.actual_mwh = source.value_mwh
     """
     spark.sql(merge_sql)
