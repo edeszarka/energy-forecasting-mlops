@@ -54,7 +54,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 try:
-    dbutils.widgets.text("lookback_hours", "168")  # 1 week
+    dbutils.widgets.text("lookback_hours", "720")  # must be >= MIN_TRAINING_ROWS (src/config.py)
     dbutils.widgets.text("run_date", "")
     dbutils.widgets.text("dry_run", "false")
     dbutils.widgets.text("force_full_rebuild", "false")
