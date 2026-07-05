@@ -42,7 +42,7 @@ DRIFT_TABLE = f"{CATALOG}.{SCHEMA}.drift_control"
 
 
 @st.cache_resource
-def get_connection():
+def get_connection() -> sql.Connection:
     return sql.connect(server_hostname=HOST, http_path=HTTP_PATH, access_token=TOKEN)
 
 
@@ -103,7 +103,7 @@ def r2_score(y_true: pd.Series, y_pred: pd.Series) -> float:
     return float(1 - ss_res / ss_tot)
 
 
-def forecast_tab(horizon: int, title: str):
+def forecast_tab(horizon: int, title: str) -> None:
     hours_back = st.sidebar.slider(
         f"{title} — lookback hours", min_value=48, max_value=2160, value=720, step=24
     )
@@ -191,7 +191,7 @@ def forecast_tab(horizon: int, title: str):
             st.info("Not enough actuals yet for scatter plot.")
 
 
-def mae_trend_tab():
+def mae_trend_tab() -> None:
     hours_back = st.sidebar.slider(
         "MAE lookback hours", min_value=48, max_value=2160, value=720, step=24
     )
@@ -266,7 +266,7 @@ def mae_trend_tab():
         st.dataframe(df.sort_values("check_timestamp", ascending=False), use_container_width=True)
 
 
-def drift_tab():
+def drift_tab() -> None:
     hours_back = st.sidebar.slider(
         "Drift lookback hours", min_value=48, max_value=2160, value=720, step=24
     )
@@ -286,7 +286,7 @@ def drift_tab():
     ]
     display = df[display_cols].copy().sort_values("check_timestamp", ascending=False)
 
-    def color_drift(val):
+    def color_drift(val: object) -> str:
         if isinstance(val, bool) and val:
             return "background-color: #ffcccc"
         return ""
