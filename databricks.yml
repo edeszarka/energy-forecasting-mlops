@@ -21,8 +21,7 @@ resources:
           notebook_task:
             notebook_path: ./notebooks/01_ingest.py
             base_parameters:
-              - "--lookback_files"
-              - "24"
+              lookback_files: "24"
           environment_key: "default"
           timeout_seconds: 1800
 
