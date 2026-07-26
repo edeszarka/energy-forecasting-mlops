@@ -12,7 +12,7 @@ on:
       lookback_hours:
         description: "How many hours back to fetch (for backfill)"
         required: false
-        default: "2"
+        default: "24"
   schedule:
     - cron: "5 * * * *"
 
@@ -99,7 +99,7 @@ jobs:
           if [ -n "$INPUT_LOOKBACK" ]; then
             LOOKBACK_HOURS="$INPUT_LOOKBACK"
           else
-            LOOKBACK_HOURS="2"
+            LOOKBACK_HOURS="24"
           fi
           
           echo "RUN_DATE=$RUN_DATE" >> $GITHUB_ENV
