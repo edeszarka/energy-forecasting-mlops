@@ -185,3 +185,71 @@ The downstream Watson/Monitoring task (or a future `databricks jobs run-now --wa
 
 - **External cron/liveness monitor**: A lightweight external service (e.g., AWS EventBridge, uptime monitor) that calls `workflow_dispatch` if no run has completed in >2 hours. This bypasses GitHub's scheduled-trigger reliability entirely.
 - **Bronze self-backfill in `01_ingest.py`**: Detect missing hours at the Databricks side during ingestion and fetch missed windows directly via the UC Volume uploads (requires network access from Databricks — currently blocked in Free Edition).
+
+---
+
+## 8. Finding 2 (Post-Implementation): `lookback_files` Mismatch
+
+### 8.1 Discovery
+
+After deploying the GHA `lookback_hours=24` fix (§3.1), the expected bronze_load row-count jump did not materialise. Bronze_load remained at **9–12 rows/day** — unchanged from the pre-fix pattern — despite successful GHA runs uploading 24 files per execution.
+
+Investigation revealed a second bottleneck in the ingestion pipeline.
+
+### 8.2 Root Cause
+
+The GHA workflow uploads 24 JSON files per run (one per hour in the lookback window). However, `notebooks/01_ingest.py` only reads **2 files per run**, controlled by a separate widget:
+
+```python
+# notebooks/01_ingest.py, line 63
+dbutils.widgets.text("lookback_files", "2")
+```
+
+The `databricks.yml` job definition for `energy_hourly_pipeline`'s ingest task has **no `base_parameters`**:
+
+```yaml
+- task_key: "ingest"
+  notebook_task:
+    notebook_path: ./notebooks/01_ingest.py
+  environment_key: "default"
+  timeout_seconds: 1800
+```
+
+Because no parameters are passed, the notebook's widget default `"2"` is used. Each ingest run scans only the 2 most recent hourly files (`run_date` and `run_date - 1h`). The other 22 uploaded files accumulate in the Volume unprocessed.
+
+This was confirmed via `databricks runs get-output` across multiple consecutive runs:
+
+| Run time | Ingest result | Files found |
+|---|---|---|
+| Jul 26 14:43 | `rows_ingested=1`, `files_found=1` | 1 file (14:00) |
+| Jul 26 15:05 | `no_files_found` | 0 — expected 15:00 file not yet uploaded |
+| Jul 26 15:08 | `no_files_found` | 0 |
+| Jul 26 15:24 | `no_files_found` | 0 |
+
+And via `bronze_load` remaining flat at 1728 total rows (only +3 from 1725) over the same period.
+
+### 8.3 Fix
+
+Add `base_parameters` to the `databricks.yml` ingest task to pass `lookback_files="24"`, matching the GHA upload window:
+
+```yaml
+- task_key: "ingest"
+  notebook_task:
+    notebook_path: ./notebooks/01_ingest.py
+    base_parameters:
+      - "--lookback_files"
+      - "24"
+  environment_key: "default"
+  timeout_seconds: 1800
+```
+
+Do **not** change `01_ingest.py`'s own widget default (`"2"`). The job-level override is the only change. This ensures:
+- The job-level override is explicit and version-controlled in `databricks.yml`.
+- The notebook's default remains conservative for manual/adhoc runs.
+- `energy_retraining_pipeline` does not reference `01_ingest.py` — no side effects.
+
+### 8.4 Acceptance Criteria
+
+- [ ] **AC7**: After deploy, the next `energy_hourly_pipeline` run ingests all 24 files uploaded by GHA. Bronze_load shows ~24 new rows/day (net) instead of ~2.
+- [ ] **AC8**: `bronze_load` reaches ~720 rows within the 37-day sliding window within ~12 days at the restored cadence, allowing `02_transform` to resume writing to `silver_features`.
+- [ ] **AC9**: The `lookback_files` widget default in `01_ingest.py` remains `"2"` — only the job-level parameter overrides it.
