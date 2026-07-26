@@ -216,7 +216,14 @@ if load_count < MIN_TRAINING_ROWS:
     msg = f"Insufficient data for feature engineering. Required: {MIN_TRAINING_ROWS}, Actual: {load_count}"
     logger.warning(msg)
     dbutils.notebook.exit(
-        json.dumps({"status": "skipped", "reason": "insufficient_data", "message": msg})
+        json.dumps(
+            {
+                "status": "SUCCESS",
+                "message": msg,
+                "rows_written": 0,
+                "insufficient_data": True,
+            }
+        )
     )
 
 load_pd = bronze_load_df.toPandas()
@@ -337,8 +344,10 @@ if force_full_rebuild and not dry_run:
 # Returns metadata about the transformation run.
 
 exit_info = {
-    "status": "success",
+    "status": "SUCCESS",
+    "message": "Transform complete",
     "rows_written": len(feature_pd),
+    "insufficient_data": False,
     "feature_columns": get_feature_columns(),
     "window_start": window_start.isoformat(),
     "window_end": window_end.isoformat(),
