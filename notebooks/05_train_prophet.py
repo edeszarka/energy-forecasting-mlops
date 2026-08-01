@@ -51,6 +51,7 @@ if tuple(int(x) for x in cmdstanpy.__version__.split(".")[:2]) >= (1, 2):
     )
 from pyspark.sql import functions as F
 
+from src.baseline import compute_naive_baseline_metrics
 from src.config import CATALOG, PATHS
 
 # COMMAND ----------
@@ -120,6 +121,8 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
         mae = np.mean(np.abs(y_true - y_pred))
         rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
         mape = calculate_mape(pd.Series(y_true), pd.Series(y_pred))
+        baseline_column = f"lag_{horizon_hours}h"
+        naive_metrics = compute_naive_baseline_metrics(test_df["y"], test_df[baseline_column])
 
         # Log params and metrics
         mlflow.log_params(
@@ -132,6 +135,7 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
             }
         )
         mlflow.log_metrics({"mae": mae, "rmse": rmse, "mape": mape})
+        mlflow.log_metrics(naive_metrics)
 
         # Reference Window Metadata
         training_data_end = train_df["ds"].max()
@@ -155,6 +159,7 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
             "mae": mae,
             "rmse": rmse,
             "mape": mape,
+            **naive_metrics,
             "n_train": len(train_df),
             "n_test": len(test_df),
         }

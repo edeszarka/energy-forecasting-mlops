@@ -49,9 +49,7 @@ from src.config import CATALOG, PATHS, SCHEMA
 dbutils.widgets.text("mape_improvement_threshold", "0.01")
 THRESHOLD = float(dbutils.widgets.get("mape_improvement_threshold"))
 
-CONFIG = {
-    "eval_table": PATHS.table_eval
-}
+CONFIG = {"eval_table": PATHS.table_eval}
 
 # COMMAND ----------
 
@@ -60,6 +58,7 @@ logger = logging.getLogger("07_evaluate")
 client = MlflowClient()
 
 # COMMAND ----------
+
 
 def get_run_metrics(model_name: str, type_filter: str):
     """
@@ -73,16 +72,18 @@ def get_run_metrics(model_name: str, type_filter: str):
         runs = client.search_runs(
             experiment_ids=[r.experiment_id for r in client.search_experiments()],
             filter_string=f"tags.model_name = '{model_name}'",
-            order_by=["attributes.start_time DESC"] if type_filter == 'challenger' else ["metrics.mape ASC"],
-            max_results=5
+            order_by=["attributes.start_time DESC"]
+            if type_filter == "challenger"
+            else ["metrics.mape ASC"],
+            max_results=5,
         )
-        
+
         if not runs:
             return None
-            
+
         # For challenger, just take the absolute latest
         # For champion, take the best one that isn't the current challenger
-        if type_filter == 'challenger':
+        if type_filter == "challenger":
             run = runs[0]
         else:
             # The champion is the best performing run that is NOT the one we just trained
@@ -99,12 +100,16 @@ def get_run_metrics(model_name: str, type_filter: str):
             "mae": metrics.get("mae"),
             "rmse": metrics.get("rmse"),
             "mape": metrics.get("mape"),
+            "naive_mae": metrics.get("naive_mae"),
+            "naive_rmse": metrics.get("naive_rmse"),
+            "naive_mape": metrics.get("naive_mape"),
             "n_train": int(metrics.get("n_train", 0)),
-            "n_test": int(metrics.get("n_test", 0))
+            "n_test": int(metrics.get("n_test", 0)),
         }
     except Exception as e:
         logger.warning(f"Error fetching {type_filter} run for {model_name}: {e}")
         return None
+
 
 # COMMAND ----------
 
@@ -117,15 +122,15 @@ eval_rows = []
 
 for name in model_names:
     horizon = 24 if "24h" in name else 168
-    
+
     # Challenger is the latest run
     challenger = get_run_metrics(name, "challenger")
     # Champion is the best historic run
     champion = get_run_metrics(name, "champion")
-    
+
     first_run = champion is None
     challenger_wins = False
-    
+
     if first_run:
         challenger_wins = True
         logger.info(f"First run detected for {name}. Challenger wins by default.")
@@ -136,58 +141,96 @@ for name in model_names:
             challenger_wins = True
             logger.info(f"{name}: Challenger wins (Improvement: {improvement:.2%})")
         else:
-            logger.info(f"{name}: Champion stays (Improvement: {improvement:.2%}, Threshold: {THRESHOLD:.2%})")
+            logger.info(
+                f"{name}: Champion stays (Improvement: {improvement:.2%}, Threshold: {THRESHOLD:.2%})"
+            )
 
     if challenger:
-        eval_rows.append({
-            "model_name": name,
-            "horizon_hours": horizon,
-            "challenger_run_id": challenger["run_id"],
-            "challenger_mae": challenger["mae"],
-            "challenger_rmse": challenger["rmse"],
-            "challenger_mape": challenger["mape"],
-            "champion_run_id": champion["run_id"] if champion else None,
-            "champion_mae": champion["mae"] if champion else None,
-            "champion_rmse": champion["rmse"] if champion else None,
-            "champion_mape": champion["mape"] if champion else None,
-            "challenger_wins": challenger_wins,
-            "first_run": first_run,
-            "evaluated_at": datetime.now(UTC),
-            "promoted": False # Placeholder for notebook 08
-        })
+        baseline_mape = challenger["naive_mape"]
+        beats_baseline = None
+        if challenger["mape"] is not None and baseline_mape is not None:
+            beats_baseline = challenger["mape"] < baseline_mape
+
+        eval_rows.append(
+            {
+                "model_name": name,
+                "horizon_hours": horizon,
+                "challenger_run_id": challenger["run_id"],
+                "challenger_mae": challenger["mae"],
+                "challenger_rmse": challenger["rmse"],
+                "challenger_mape": challenger["mape"],
+                "baseline_mae": challenger["naive_mae"],
+                "baseline_rmse": challenger["naive_rmse"],
+                "baseline_mape": baseline_mape,
+                "beats_baseline": beats_baseline,
+                "champion_run_id": champion["run_id"] if champion else None,
+                "champion_mae": champion["mae"] if champion else None,
+                "champion_rmse": champion["rmse"] if champion else None,
+                "champion_mape": champion["mape"] if champion else None,
+                "challenger_wins": challenger_wins,
+                "first_run": first_run,
+                "evaluated_at": datetime.now(UTC),
+                "promoted": False,  # Placeholder for notebook 08
+            }
+        )
 
 if not eval_rows:
     raise ValueError("No challenger models found to evaluate.")
 
 # Write results to Delta
-EVAL_SCHEMA = StructType([
-    StructField("model_name", StringType(), False),
-    StructField("horizon_hours", IntegerType(), False),
-    StructField("challenger_run_id", StringType(), False),
-    StructField("challenger_mae", DoubleType(), True),
-    StructField("challenger_rmse", DoubleType(), True),
-    StructField("challenger_mape", DoubleType(), True),
-    StructField("champion_run_id", StringType(), True),
-    StructField("champion_mae", DoubleType(), True),
-    StructField("champion_rmse", DoubleType(), True),
-    StructField("champion_mape", DoubleType(), True),
-    StructField("challenger_wins", BooleanType(), False),
-    StructField("first_run", BooleanType(), False),
-    StructField("evaluated_at", TimestampType(), False),
-    StructField("promoted", BooleanType(), False)
-])
+EVAL_SCHEMA = StructType(
+    [
+        StructField("model_name", StringType(), False),
+        StructField("horizon_hours", IntegerType(), False),
+        StructField("challenger_run_id", StringType(), False),
+        StructField("challenger_mae", DoubleType(), True),
+        StructField("challenger_rmse", DoubleType(), True),
+        StructField("challenger_mape", DoubleType(), True),
+        StructField("baseline_mae", DoubleType(), True),
+        StructField("baseline_rmse", DoubleType(), True),
+        StructField("baseline_mape", DoubleType(), True),
+        StructField("beats_baseline", BooleanType(), True),
+        StructField("champion_run_id", StringType(), True),
+        StructField("champion_mae", DoubleType(), True),
+        StructField("champion_rmse", DoubleType(), True),
+        StructField("champion_mape", DoubleType(), True),
+        StructField("challenger_wins", BooleanType(), False),
+        StructField("first_run", BooleanType(), False),
+        StructField("evaluated_at", TimestampType(), False),
+        StructField("promoted", BooleanType(), False),
+    ]
+)
 
 eval_df = spark.createDataFrame(eval_rows, schema=EVAL_SCHEMA)
-eval_df.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(CONFIG["eval_table"])
+eval_df.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(
+    CONFIG["eval_table"]
+)
 
 # Print recommendation summary
 print("\nModel Evaluation Summary:")
 pdf = eval_df.toPandas()
-print(pdf[["model_name", "challenger_mape", "champion_mape", "challenger_wins"]].to_string(index=False))
+print(
+    pdf[
+        [
+            "model_name",
+            "challenger_mape",
+            "baseline_mape",
+            "champion_mape",
+            "beats_baseline",
+            "challenger_wins",
+        ]
+    ].to_string(index=False)
+)
+
+for _, row in pdf[pdf["beats_baseline"].eq(False)].iterrows():
+    print(
+        f"WARNING: {row['model_name']} does NOT beat the naive baseline "
+        f"(model {row['challenger_mape']:.2f}% vs baseline {row['baseline_mape']:.2f}%)."
+    )
 
 recommendations = []
 for _, row in pdf.iterrows():
-    status = "PROMOTE" if row['challenger_wins'] else "SKIP"
+    status = "PROMOTE" if row["challenger_wins"] else "SKIP"
     msg = f"{status}: {row['model_name']} (MAPE: {row['challenger_mape']:.2f}% vs {row['champion_mape'] if row['champion_mape'] else 'N/A'})"
     recommendations.append(msg)
 
