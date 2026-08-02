@@ -1,6 +1,6 @@
 # Energy Consumption Forecasting — MLOps Pipeline on Databricks
 
-End-to-end forecasting pipeline for Hungarian electricity consumption using live ENTSO-E data, Databricks, Delta Lake, and MLflow. Hourly predictions, automated retraining on drift, CI/CD via GitHub Actions.
+End-to-end forecasting pipeline for Hungarian electricity consumption using live ENTSO-E data, Databricks, Delta Lake, and MLflow. Hourly predictions, weekly retraining with drift signals, CI/CD via GitHub Actions.
 
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![Databricks](https://img.shields.io/badge/Platform-Databricks-orange.svg)](https://www.databricks.com/)
@@ -31,7 +31,7 @@ This project implements a **Split Ingestion Architecture** to overcome the outbo
                     ┌─────────────────────────┴─────────────────────────┐
                     │                                                   │
        [ energy_hourly_pipeline ]                   [ energy_retraining_pipeline ]
-       (Every hour at :05 UTC)                      (Sundays 02:00 UTC or on drift)
+       (Every hour at :05 UTC)                      (Sundays 02:00 UTC)
                     │                                                   │
         ┌───────────┼───────────┐                       ┌───────────────┼───────────────┐
         ▼           ▼           ▼                       ▼               ▼               ▼
@@ -50,7 +50,7 @@ The pipeline is split into two independent Databricks Workflows: the **Hourly Jo
 ### Reliability Design
 - **Separation of Concerns**: GitHub Actions handles all external connectivity, while Databricks remains an air-gapped environment focused on scalable processing and modeling.
 - **Persistence Layer**: Unity Catalog Volumes act as the landing zone for raw data, ensuring a clear audit trail and enabling easy backfills.
-- **Idempotency**: All Delta writes use `MERGE INTO`. Forecast rows use a deterministic `forecast_id` (MD5 hash) — job retries never create duplicates.
+- **Idempotency**: Bronze, silver, and gold forecast writes use `MERGE INTO`; control and audit tables use append-only writes. Forecast rows use a deterministic `forecast_id` (MD5 hash) — job retries never create duplicates.
 
 ## Data
 
@@ -99,13 +99,15 @@ The 12 features used for model input: temperature_c, lag_24h, lag_48h, lag_168h,
 | Prophet | 24h | Built-in decomposition | temp regressor, HU holidays | energy_prophet_24h |
 | Prophet | 168h | Built-in decomposition | temp regressor, HU holidays | energy_prophet_168h |
 
+LightGBM training uses Optuna hyperparameter optimization with 25 trials by default. Each trial is evaluated with custom time-ordered 3-fold cross-validation and a 168-hour gap between train and validation data to reduce leakage.
+
 ### Champion/Challenger Pattern
-Every retraining run produces a "Challenger" model. The `07_evaluate` notebook compares the Challenger's MAPE against the current "Production" model ("Champion"). A Challenger is promoted only if it achieves ≥1% relative MAPE improvement. The `08_promote_model` notebook tags the winning run with `production=true` (run-based MLOps pattern, since Free Edition blocks `mlflow.register_model()`).
+Every retraining run produces a "Challenger" model. The `07_evaluate` notebook compares the Challenger's MAPE against the current "Production" model ("Champion"). A Challenger is promoted only if it achieves >1% relative MAPE improvement. The `08_promote_model` notebook tags the winning run with `production=true` (run-based MLOps pattern, since Free Edition blocks `mlflow.register_model()`).
 
 ## MLOps Design
 
 ### Drift Detection
-Drift monitoring uses Evidently AI's `DataDriftPreset` in `03_drift_check`. It detects statistical shifts in features and target distributions. If drift persists for 3 consecutive hours, a retrain flag is raised via a Volume marker file.
+Drift monitoring uses Evidently AI's `DataDriftPreset` in `03_drift_check`. It detects statistical shifts in features and target distributions. If drift persists for 3 consecutive hours, `03_drift_check` writes a durable, deduplicated retrain flag to a Volume, subject to a 24-hour cooldown. The flag is consumed by `08_promote_model.py` for audit metadata; retraining itself runs on the fixed weekly schedule.
 
 ### CI/CD
 
@@ -177,7 +179,7 @@ databricks bundle deploy --target prod
 
 ### Pipeline Execution
 - **Hourly**: GitHub Actions fetches data → uploads to UC Volumes → triggers Databricks `energy_hourly_pipeline` (ingest → transform → drift_check → predict)
-- **Weekly**: `energy_retraining_pipeline` runs Sundays 02:00 UTC (train → evaluate → promote), or on-demand when drift is detected
+- **Weekly**: `energy_retraining_pipeline` runs Sundays 02:00 UTC (train → evaluate → promote); drift signals are consumed for audit metadata during the scheduled cycle
 
 ## Dashboard
 
@@ -226,10 +228,8 @@ TOTAL                89%  (threshold: 80%)
 
 ## Planned Enhancements
 - Cyclical encoding (sine/cosine for hour_of_day, day_of_week)
-- Optuna hyperparameter optimization
 - Residual analysis (MAPE heatmap by hour/DOW)
 - Quantile regression (prediction intervals)
-- TimeSeriesSplit cross-validation
 - Feature importance drift monitoring (SHAP over time)
 
 ## License
