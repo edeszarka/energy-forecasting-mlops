@@ -43,7 +43,15 @@ import shap
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from src.baseline import compute_naive_baseline_metrics
-from src.config import CATALOG, LGBM_PARAMS, MODEL_INPUT_FEATURES, OPTUNA_N_TRIALS, PATHS
+from src.config import (
+    CATALOG,
+    LGBM_PARAMS,
+    MIN_TRAINING_ROWS,
+    MODEL_INPUT_FEATURES,
+    OPTUNA_N_TRIALS,
+    PATHS,
+)
+from src.splits import make_holdout_splits
 from src.tuning import run_lgbm_tuning
 
 # Fix for MLflow model registration in Databricks Unity Catalog
@@ -51,12 +59,14 @@ os.environ["MLFLOW_USE_DATABRICKS_SDK_MODEL_ARTIFACTS_REPO_FOR_UC"] = "True"
 
 # COMMAND ----------
 
+dbutils.widgets.text("val_days", "5")
 dbutils.widgets.text("test_days", "5")
 dbutils.widgets.text("min_train_rows", "200")
 dbutils.widgets.text("n_trials", str(OPTUNA_N_TRIALS))
 
 CONFIG = {
     "silver_table": PATHS.table_silver,
+    "val_days": int(dbutils.widgets.get("val_days")),
     "test_days": int(dbutils.widgets.get("test_days")),
     "min_train_rows": int(dbutils.widgets.get("min_train_rows")),
     "n_trials": int(dbutils.widgets.get("n_trials")),
@@ -83,16 +93,20 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
     df_model["target"] = df_model["value_mwh"].shift(-horizon_hours)
     df_model = df_model.dropna(subset=["target"] + FEATURE_COLS)
 
-    split_date = df_model["timestamp"].max() - pd.Timedelta(days=CONFIG["test_days"])
-    train_df = df_model[df_model["timestamp"] <= split_date]
-    test_df = df_model[df_model["timestamp"] > split_date]
+    train_mask, val_mask, test_mask = make_holdout_splits(
+        df_model["timestamp"], CONFIG["val_days"], CONFIG["test_days"]
+    )
+    train_df = df_model[train_mask]
+    val_df = df_model[val_mask]
+    test_df = df_model[test_mask]
 
-    if len(train_df) < CONFIG["min_train_rows"]:
+    if len(train_df) < max(MIN_TRAINING_ROWS, CONFIG["min_train_rows"]):
         raise ValueError(
-            f"Insufficient data for {model_name}. Need {CONFIG['min_train_rows']}, got {len(train_df)}"
+            f"Insufficient data for {model_name}. Need {max(MIN_TRAINING_ROWS, CONFIG['min_train_rows'])}, got {len(train_df)}"
         )
 
     X_train, y_train = train_df[FEATURE_COLS], train_df["target"]
+    X_val, y_val = val_df[FEATURE_COLS], val_df["target"]
     X_test, y_test = test_df[FEATURE_COLS], test_df["target"]
 
     with mlflow.start_run(run_name=f"lgbm_{horizon_hours}h", nested=True) as run:
@@ -112,7 +126,7 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
         params["n_estimators"] = 500  # fixed cap, early stopping handles actual count
 
         model = lgb.LGBMRegressor(**params)
-        model.fit(X_train, y_train, eval_set=[(X_test, y_test)], callbacks=[lgb.early_stopping(50)])
+        model.fit(X_train, y_train, eval_set=[(X_val, y_val)], callbacks=[lgb.early_stopping(50)])
 
         y_pred = model.predict(X_test)
         mae, rmse, mape = (
