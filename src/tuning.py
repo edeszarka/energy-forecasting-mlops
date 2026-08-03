@@ -52,6 +52,7 @@ def get_lgbm_search_space() -> dict[str, BaseDistribution]:
         "colsample_bytree": FloatDistribution(0.6, 1.0),
         "reg_alpha": FloatDistribution(0.0, 1.0),
         "reg_lambda": FloatDistribution(0.0, 1.0),
+        "objective": CategoricalDistribution(["regression", "regression_l1", "huber"]),
     }
 
 
@@ -132,6 +133,9 @@ def objective(
         else trial.suggest_categorical(key, cast(CategoricalDistribution, dist).choices)
         for key, dist in space.items()
     }
+
+    if params["objective"] == "huber":
+        params["alpha"] = 1.0
 
     params = {
         **LGBM_PARAMS,

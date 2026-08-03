@@ -26,6 +26,7 @@ class TestGetLgbmSearchSpace:
             "colsample_bytree",
             "reg_alpha",
             "reg_lambda",
+            "objective",
         }
         assert set(space.keys()) == expected_keys
 
@@ -35,6 +36,14 @@ class TestGetLgbmSearchSpace:
         space = get_lgbm_search_space()
         for v in space.values():
             assert isinstance(v, BaseDistribution)
+
+    def test_search_space_includes_objective(self):
+        from optuna.distributions import CategoricalDistribution
+
+        space = get_lgbm_search_space()
+        assert "objective" in space
+        assert isinstance(space["objective"], CategoricalDistribution)
+        assert space["objective"].choices == ("regression", "regression_l1", "huber")
 
 
 class TestMakeTimeseriesSplits:
@@ -97,6 +106,50 @@ class TestObjective:
         assert isinstance(score, float)
         assert score > 0
 
+    def test_objective_with_l1_returns_finite_float(self, mock_data):
+        X, y = mock_data
+        from optuna import create_study
+
+        study = create_study(direction="minimize")
+        study.enqueue_trial(
+            {
+                "num_leaves": 31,
+                "learning_rate": 0.05,
+                "min_child_samples": 20,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "reg_alpha": 0.1,
+                "reg_lambda": 0.1,
+                "objective": "regression_l1",
+            }
+        )
+        trial = study.ask()
+        score = objective(trial, X, y, horizon_hours=24)
+        assert isinstance(score, float)
+        assert np.isfinite(score)
+
+    def test_objective_with_huber_returns_finite_float(self, mock_data):
+        X, y = mock_data
+        from optuna import create_study
+
+        study = create_study(direction="minimize")
+        study.enqueue_trial(
+            {
+                "num_leaves": 31,
+                "learning_rate": 0.05,
+                "min_child_samples": 20,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "reg_alpha": 0.1,
+                "reg_lambda": 0.1,
+                "objective": "huber",
+            }
+        )
+        trial = study.ask()
+        score = objective(trial, X, y, horizon_hours=24)
+        assert isinstance(score, float)
+        assert np.isfinite(score)
+
 
 class TestRunLgbmTuning:
     @pytest.fixture
@@ -135,6 +188,7 @@ class TestRunLgbmTuning:
             "colsample_bytree",
             "reg_alpha",
             "reg_lambda",
+            "objective",
         }
         assert set(result.keys()) == expected_keys
 
@@ -150,3 +204,8 @@ class TestRunLgbmTuning:
         merged = {**LGBM_PARAMS, **tuned}
         for key in tuned:
             assert merged[key] == tuned[key]
+
+    def test_run_lgbm_tuning_can_return_non_regression_objective(self, mock_data):
+        X, y = mock_data
+        result = run_lgbm_tuning(X, y, horizon_hours=24, n_trials=25)
+        assert result["objective"] in {"regression", "regression_l1", "huber"}
