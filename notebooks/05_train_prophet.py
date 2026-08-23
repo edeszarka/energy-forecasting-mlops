@@ -53,6 +53,7 @@ from pyspark.sql import functions as F
 
 from src.baseline import compute_naive_baseline_metrics
 from src.config import CATALOG, PATHS
+from src.splits import make_prophet_holdout_split
 
 # COMMAND ----------
 
@@ -83,13 +84,15 @@ def calculate_mape(actual: pd.Series, predicted: pd.Series) -> float:
     return np.mean(np.abs((actual[mask] - predicted[mask]) / actual[mask])) * 100
 
 
-def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
+def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str) -> dict:
     """Trains a Prophet model for a specific horizon and logs to MLflow."""
 
-    # Split data
-    split_date = df["ds"].max() - pd.Timedelta(days=CONFIG["test_days"])
-    train_df = df[df["ds"] <= split_date].copy()
-    test_df = df[df["ds"] > split_date].copy()
+    # Split data using horizon-aware split
+    train_mask, test_mask = make_prophet_holdout_split(
+        df["ds"], horizon_hours, int(CONFIG["test_days"])
+    )
+    train_df = df[train_mask].copy()
+    test_df = df[test_mask].copy()
 
     if len(train_df) < CONFIG["min_train_rows"]:
         raise ValueError(
