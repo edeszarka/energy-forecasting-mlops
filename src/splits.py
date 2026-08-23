@@ -59,3 +59,45 @@ def make_prophet_holdout_split(
     test_mask = timestamps > test_start
 
     return train_mask, test_mask
+
+
+def make_prophet_rolling_origins(
+    timestamps: pd.Series,
+    horizon_hours: int,
+    test_days: int,
+    n_folds: int = 5,
+) -> list[tuple[pd.Series, pd.Series]]:
+    """Returns a list of (train_mask, target_mask) pairs for rolling-origin
+    backtesting. Each fold's target_mask selects exactly the row(s) at
+    horizon_hours ahead of that fold's train cutoff — NOT a wide window.
+
+    Target timestamps are spaced evenly across the last `test_days` days.
+    Each fold trains on [t_min, origin_i] where origin_i = target_i - horizon_hours.
+    Target_i = t_max - test_days_in_hours + i * step, for i in [0, n_folds).
+    Scored at (target_i - 0.5h, target_i + 0.5h] (a half-hour tolerance window
+    to catch the single matching hourly row).
+    """
+    t_max = timestamps.max()
+    test_hours = test_days * 24
+
+    # Target timestamps spaced evenly across the last test_days window
+    # target_0 = t_max - test_hours, target_{n_folds-1} = t_max (approximately)
+    target_window_start = t_max - pd.Timedelta(hours=test_hours)
+    step_hours = test_hours / n_folds
+
+    folds = []
+    for i in range(n_folds):
+        # Target timestamp for this fold (what we're predicting)
+        target_center = target_window_start + pd.Timedelta(hours=i * step_hours)
+        target_start = target_center - pd.Timedelta(minutes=30)
+        target_end = target_center + pd.Timedelta(minutes=30)
+
+        # Origin (train cutoff) is horizon_hours before the target
+        cutoff = target_center - pd.Timedelta(hours=horizon_hours)
+
+        train_mask = timestamps <= cutoff
+        target_mask = (timestamps > target_start) & (timestamps <= target_end)
+
+        folds.append((train_mask, target_mask))
+
+    return folds
