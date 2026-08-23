@@ -200,10 +200,12 @@ Results will be populated after the pipeline runs on live data for 7+ days. Metr
 
 | Model | Horizon | Test MAPE | Test MAE (MWh) | Test RMSE (MWh) | Test Period |
 |---|---|---|---|---|---|
-| LightGBM | 24h | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| LightGBM | 168h | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| LightGBM | 24h | 0.32% | 16.758 | 33.731 | 2026-08-11 – 2026-08-16 |
+| LightGBM | 168h | 1.78% | 108.934 | 237.341 | 2026-08-11 – 2026-08-16 |
 | Prophet | 24h | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
 | Prophet | 168h | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+
+LightGBM results computed under the spec-004 corrected three-way split (val/test disjoint); naive baseline MAPE was 8.08% (24h) / 13.73% (168h).
 
 Published benchmarks for Hungary report 2–5% MAPE for 24h horizons.
 
