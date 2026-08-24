@@ -97,6 +97,7 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str) -
     all_pred = []
     all_baseline = []
     fold_cutoffs = []
+    fold_train_sizes = []
 
     for fold_idx, (train_mask, target_mask) in enumerate(folds):
         fold_train = df[train_mask].copy()
@@ -134,8 +135,9 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str) -
         baseline_column = f"lag_{horizon_hours}h"
         all_baseline.extend(fold_target[baseline_column].values)
 
-        # Track fold cutoff for MLflow logging
+        # Track fold cutoff and train size for MLflow logging
         fold_cutoffs.append(fold_train["ds"].max().isoformat())
+        fold_train_sizes.append(len(fold_train))
 
     if not all_actual:
         raise ValueError(
@@ -158,7 +160,8 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str) -
                 "changepoint_prior_scale": 0.05,
                 "seasonality_mode": "multiplicative",
                 "horizon_hours": horizon_hours,
-                "n_train": len(y_true),  # Pooled test rows (one per fold)
+                "n_test": len(y_true),  # Pooled test rows (one per fold)
+                "n_train_range": f"{min(fold_train_sizes)}-{max(fold_train_sizes)}",
                 "n_folds": n_folds,
                 "fold_cutoffs": ",".join(fold_cutoffs),
             }
@@ -166,9 +169,12 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str) -
         mlflow.log_metrics({"mae": mae, "rmse": rmse, "mape": mape})
         mlflow.log_metrics(naive_metrics)
 
-        # Reference Window Metadata - use the full training data range
-        training_data_end = df["ds"].max()
-        training_data_start = df["ds"].min()
+        # Reference Window Metadata
+        # training_data_end is the LATEST of the per-fold cutoffs (i.e. the most
+        # recent training cutoff among successful folds) — not a claim that all
+        # folds trained up to that point.
+        training_data_end = max(pd.Timestamp(c) for c in fold_cutoffs)
+        training_data_start = df["ds"].min()  # earliest row any fold could have used
         mlflow.set_tag("model_name", model_name)
         mlflow.set_tag("training_data_end", training_data_end.isoformat())
         mlflow.set_tag("training_data_start", training_data_start.isoformat())
@@ -178,6 +184,13 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str) -
 
         # Log model - use the last fold's model for registration (or retrain on all data)
         # For now, retrain on all available data up to the last cutoff for the registered model
+        # DECISION NEEDED: final_model currently trains only up to the last fold's
+        # cutoff (~<horizon_hours> hours short of the most recent data), to stay
+        # consistent with how it was evaluated. Alternative: train on ALL available
+        # data (df up to df['ds'].max()) for serving, accepting that the served
+        # model is then slightly different from anything actually evaluated above.
+        # Not resolved in spec 005b — flagging for explicit decision before this
+        # ships to production serving.
         last_cutoff = pd.Timestamp(fold_cutoffs[-1])
         full_train_mask = df["ds"] <= last_cutoff
         full_train_df = df[full_train_mask].copy()
