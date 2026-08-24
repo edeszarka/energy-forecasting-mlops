@@ -182,18 +182,12 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str) -
         mlflow.set_tag("n_folds", str(n_folds))
         mlflow.set_tag("fold_cutoffs", ",".join(fold_cutoffs))
 
-        # Log model - use the last fold's model for registration (or retrain on all data)
-        # For now, retrain on all available data up to the last cutoff for the registered model
-        # DECISION NEEDED: final_model currently trains only up to the last fold's
-        # cutoff (~<horizon_hours> hours short of the most recent data), to stay
-        # consistent with how it was evaluated. Alternative: train on ALL available
-        # data (df up to df['ds'].max()) for serving, accepting that the served
-        # model is then slightly different from anything actually evaluated above.
-        # Not resolved in spec 005b — flagging for explicit decision before this
-        # ships to production serving.
-        last_cutoff = pd.Timestamp(fold_cutoffs[-1])
-        full_train_mask = df["ds"] <= last_cutoff
-        full_train_df = df[full_train_mask].copy()
+        # Log model - retrain on all available data for serving
+        # Served model trains on all available data (unlike the evaluation folds,
+        # which each stop horizon_hours before their target) — a deployed forecaster
+        # should use the freshest data available; only the evaluation needs the
+        # horizon-gap discipline to measure honest N-hours-ahead accuracy.
+        full_train_df = df.copy()
 
         final_model = Prophet(
             yearly_seasonality=True,
