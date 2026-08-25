@@ -202,10 +202,10 @@ Results will be populated after the pipeline runs on live data for 7+ days. Metr
 |---|---|---|---|---|---|
 | LightGBM | 24h | 0.32% | 16.758 | 33.731 | 2026-08-11 – 2026-08-16 |
 | LightGBM | 168h | 1.78% | 108.934 | 237.341 | 2026-08-11 – 2026-08-16 |
-| Prophet | 24h | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| Prophet | 168h | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| Prophet | 24h | 15.70% | 821.23 | 885.96 | 2026-08-19 – 2026-08-23 |
+| Prophet | 168h | 51.75% | 2658.98 | 2666.76 | 2026-08-19 – 2026-08-23 |
 
-LightGBM results computed under the spec-004 corrected three-way split (val/test disjoint); naive baseline MAPE was 8.08% (24h) / 13.73% (168h).
+LightGBM results (spec 004, corrected 3-way split) and Prophet results (spec 005b, 5-fold rolling-origin backtest) use different test periods and evaluation methodologies — they are not directly comparable to each other, only to their own naive baseline. Naive baseline MAPE: LightGBM 8.08%/13.73% (24h/168h); Prophet 6.08%/5.44% (24h/168h). Neither Prophet model beats its naive baseline at either horizon (see spec 002's beats_baseline metric) — LightGBM remains the only model family with demonstrated skill over persistence forecasting on this dataset.
 
 Published benchmarks for Hungary report 2–5% MAPE for 24h horizons.
 
