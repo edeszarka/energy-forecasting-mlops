@@ -24,7 +24,7 @@ dbutils.library.restartPython()
 # MAGIC **Inputs:**
 # MAGIC - JSON files in `/Volumes/workspace/energy_forecasting/raw_ingestion/`
 # MAGIC - `run_date`: ISO 8601 timestamp (UTC) for the run.
-# MAGIC - `lookback_files`: Number of hourly files to look back.
+# MAGIC - `max_files_per_run`: Maximum number of pending hourly files to process this run.
 # MAGIC - `dry_run`: If true, no data is written to Delta tables.
 # MAGIC
 # MAGIC **Outputs:**
@@ -60,13 +60,15 @@ from datetime import UTC, datetime, timedelta
 try:
     dbutils.widgets.text("run_date", "")
     dbutils.widgets.text("dry_run", "false")
-    dbutils.widgets.text("lookback_files", "2")
+    # Notebook default is conservative for manual/adhoc runs; the job-level
+    # base_parameters override (databricks.yml) sets the production ceiling.
+    dbutils.widgets.text("max_files_per_run", "24")
 except NameError:
     pass
 
 run_date_raw = dbutils.widgets.get("run_date")
 dry_run = dbutils.widgets.get("dry_run").lower() == "true"
-lookback_files = int(dbutils.widgets.get("lookback_files"))
+max_files_per_run = int(dbutils.widgets.get("max_files_per_run"))
 
 if not run_date_raw:
     # Floor to current UTC hour
@@ -76,7 +78,7 @@ else:
 
 print(f"Resolved run_date: {run_date}")
 print(f"Dry run: {dry_run}")
-print(f"Lookback files: {lookback_files}")
+print(f"Max files per run: {max_files_per_run}")
 
 # COMMAND ----------
 
@@ -100,6 +102,7 @@ from pyspark.sql.types import (
 from pyspark.sql.utils import AnalysisException
 
 from src.config import CATALOG, ENTSO_E_ZONE, PATHS, SCHEMA
+from src.ingest_discovery import select_pending_files
 
 # Setup catalog and schema
 spark.sql(f"USE CATALOG {CATALOG}")
@@ -149,42 +152,53 @@ TEMPERATURE_TABLE_SCHEMA = StructType(
 
 # COMMAND ----------
 
-# Cell 5: Resolve file paths to ingest
-# Identifies which JSON files exist in the Volume for the given lookback window.
+# Cell 5: Discover pending files in the Volume
+# Lists what is actually present in the raw-ingestion Volume directories
+# (Cell 11 archives processed files, so anything still landing here IS the
+# backlog) and selects up to max_files_per_run, oldest first.
 
 VOLUME_LOAD_PATH = PATHS.volume_raw_load
 VOLUME_TEMP_PATH = PATHS.volume_raw_temp
 
-found_load_files = []
-missing_load_files = []
-found_temp_files = []
-missing_temp_files = []
 
-for i in range(lookback_files):
-    target_hour = run_date - timedelta(hours=i)
-    filename = target_hour.strftime("%Y-%m-%dT%H-00-00Z") + ".json"
-
-    load_path = f"{VOLUME_LOAD_PATH}/{filename}"
-    temp_path = f"{VOLUME_TEMP_PATH}/{filename}"
-
-    # Check Load file
+def list_volume_json_files(path: str) -> list[str]:
+    """Lists filenames currently present in a Volume directory. Returns an
+    empty list (not an error) if the directory doesn't exist yet."""
     try:
-        dbutils.fs.ls(load_path)
-        found_load_files.append(load_path)
+        return [f.path for f in dbutils.fs.ls(path) if f.path.endswith(".json")]
     except Exception:
-        missing_load_files.append(load_path)
-        logger.warning(f"Load file missing: {load_path}")
+        return []
 
-    # Check Temp file
-    try:
-        dbutils.fs.ls(temp_path)
-        found_temp_files.append(temp_path)
-    except Exception:
-        missing_temp_files.append(temp_path)
-        logger.warning(f"Temperature file missing: {temp_path}")
 
-print(f"Found {len(found_load_files)} of {lookback_files} expected load files.")
-print(f"Found {len(found_temp_files)} of {lookback_files} expected temp files.")
+pending_load_files = list_volume_json_files(VOLUME_LOAD_PATH)
+pending_temp_files = list_volume_json_files(VOLUME_TEMP_PATH)
+
+found_load_files, load_backlog_remaining = select_pending_files(
+    pending_load_files, max_files_per_run
+)
+found_temp_files, temp_backlog_remaining = select_pending_files(
+    pending_temp_files, max_files_per_run
+)
+
+print(
+    f"Discovered {len(pending_load_files)} load files, {len(pending_temp_files)} temperature files."
+)
+print(
+    f"Selected {len(found_load_files)} load files, {len(found_temp_files)} "
+    f"temperature files (cap: {max_files_per_run})."
+)
+
+if load_backlog_remaining > 0:
+    logger.warning(
+        f"{load_backlog_remaining} load files still pending after this run's "
+        f"cap of {max_files_per_run}; will be picked up by a subsequent run."
+    )
+
+if temp_backlog_remaining > 0:
+    logger.warning(
+        f"{temp_backlog_remaining} temperature files still pending after this "
+        f"run's cap of {max_files_per_run}; will be picked up by a subsequent run."
+    )
 
 if not found_load_files:
     dbutils.notebook.exit(
@@ -192,9 +206,7 @@ if not found_load_files:
             {
                 "status": "skipped",
                 "reason": "no_files_found",
-                "expected_paths": [
-                    f"{VOLUME_LOAD_PATH}/{run_date.strftime('%Y-%m-%dT%H-00-00Z')}.json"
-                ],
+                "message": f"Load directory {VOLUME_LOAD_PATH} contains no pending .json files.",
             }
         )
     )
@@ -336,6 +348,8 @@ if not dry_run:
             StructField("run_id", StringType(), False),
             StructField("run_date", TimestampType(), False),
             StructField("files_found", IntegerType(), False),
+            # files_missing: repurposed from "expected hourly filenames absent"
+            # to "pending backlog remaining after this run's max_files_per_run cap".
             StructField("files_missing", IntegerType(), False),
             StructField("rows_ingested", IntegerType(), False),
             StructField("null_count", IntegerType(), False),
@@ -350,7 +364,7 @@ if not dry_run:
             run_id,
             run_date,
             len(found_load_files),
-            len(missing_load_files),
+            load_backlog_remaining,
             int(load_count),
             int(null_load),
             0,
@@ -431,7 +445,7 @@ dbutils.notebook.exit(
         {
             "status": "success",
             "files_found": len(found_load_files),
-            "files_missing": len(missing_load_files),
+            "files_missing": load_backlog_remaining,
             "rows_ingested": int(load_count),
             "gaps_detected_count": len(detected_gaps),
             "first_gap": detected_gaps[0] if detected_gaps else None,
