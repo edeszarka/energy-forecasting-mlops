@@ -58,6 +58,7 @@ from pyspark.sql.types import (
 )
 
 from src.config import CATALOG, MODEL_INPUT_FEATURES, PATHS
+from src.forecast_timing import resolve_target_timestamp
 
 # COMMAND ----------
 
@@ -302,14 +303,19 @@ def generate_forecasts(
         preds = forecast["yhat"].clip(lower=0).values
 
     output_rows = []
-    for _i, (ts, pred) in enumerate(zip(features_df.index, preds, strict=False)):
-        # IDEMPOTENCY: Deterministic Hash
-        f_id = hashlib.md5(f"{model_name}_{horizon_hours}_{ts.isoformat()}".encode()).hexdigest()
+    for _i, (anchor_ts, pred) in enumerate(zip(features_df.index, preds, strict=False)):
+        target_ts = resolve_target_timestamp(anchor_ts, model_name, horizon_hours)
+        # IDEMPOTENCY: Deterministic Hash — keyed on the row's own (target)
+        # timestamp, per GEMINI.md's MD5(model_name + horizon + timestamp)
+        # convention. Using anchor_ts here would silently reintroduce the bug.
+        f_id = hashlib.md5(
+            f"{model_name}_{horizon_hours}_{target_ts.isoformat()}".encode()
+        ).hexdigest()
 
         output_rows.append(
             {
                 "forecast_id": f_id,
-                "timestamp": ts,
+                "timestamp": target_ts,
                 "forecast_run_at": forecast_run_at,
                 "model_name": model_name,
                 "model_version": str(model_version),
