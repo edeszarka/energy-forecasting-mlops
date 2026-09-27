@@ -52,6 +52,7 @@ from src.config import (
     PATHS,
 )
 from src.splits import make_holdout_splits
+from src.target_construction import build_horizon_target
 from src.tuning import run_lgbm_tuning
 
 # Fix for MLflow model registration in Databricks Unity Catalog
@@ -89,8 +90,7 @@ def calculate_mape(actual: pd.Series, predicted: pd.Series) -> float:
 
 def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
     """Trains a LightGBM model using direct forecasting strategy."""
-    df_model = df.copy()
-    df_model["target"] = df_model["value_mwh"].shift(-horizon_hours)
+    df_model = build_horizon_target(df, horizon_hours)
     df_model = df_model.dropna(subset=["target"] + FEATURE_COLS)
 
     train_mask, val_mask, test_mask = make_holdout_splits(
