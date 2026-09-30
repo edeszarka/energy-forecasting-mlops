@@ -140,7 +140,7 @@ def decide_promotions(
         try:
             prod_runs = mlflow_client.search_runs(
                 experiment_ids=[r.experiment_id for r in mlflow_client.search_experiments()],
-                filter_string=f"tags.model_name = '{model_name}' AND tags.production = 'true'",
+                filter_string=f"tags.model_name = '{model_name}' AND tags.production = 'true' AND tags.leak_affected = 'false'",
                 max_results=1,
             )
             champion = prod_runs[0] if prod_runs else None

@@ -71,7 +71,7 @@ def get_run_metrics(model_name: str, type_filter: str):
         # Note: We filter by model_name tag we added in notebooks 05/06
         runs = client.search_runs(
             experiment_ids=[r.experiment_id for r in client.search_experiments()],
-            filter_string=f"tags.model_name = '{model_name}'",
+            filter_string=f"tags.model_name = '{model_name}' AND tags.leak_affected = 'false'",
             order_by=["attributes.start_time DESC"]
             if type_filter == "challenger"
             else ["metrics.mape ASC"],
