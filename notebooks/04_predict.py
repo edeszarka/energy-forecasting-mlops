@@ -129,7 +129,7 @@ def load_best_model_from_runs(model_name: str, mlflow_client: MlflowClient):
         # 1. Try to find the run tagged as 'production'
         runs = mlflow_client.search_runs(
             experiment_ids=exp_ids,
-            filter_string=f"tags.model_name = '{model_name}' AND tags.production = 'true'",
+            filter_string=f"tags.model_name = '{model_name}' AND tags.production = 'true' AND tags.leak_affected = 'false'",
             order_by=["metrics.mape ASC"],
             max_results=1,
         )
@@ -143,7 +143,7 @@ def load_best_model_from_runs(model_name: str, mlflow_client: MlflowClient):
             )
             runs = mlflow_client.search_runs(
                 experiment_ids=exp_ids,
-                filter_string=f"tags.model_name = '{model_name}'",
+                filter_string=f"tags.model_name = '{model_name}' AND tags.leak_affected = 'false'",
                 order_by=["metrics.mape ASC"],
                 max_results=1,
             )

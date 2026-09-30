@@ -176,6 +176,7 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str) -
         training_data_end = max(pd.Timestamp(c) for c in fold_cutoffs)
         training_data_start = df["ds"].min()  # earliest row any fold could have used
         mlflow.set_tag("model_name", model_name)
+        mlflow.set_tag("leak_affected", "false")
         mlflow.set_tag("training_data_end", training_data_end.isoformat())
         mlflow.set_tag("training_data_start", training_data_start.isoformat())
         mlflow.set_tag("evaluation_method", "rolling_origin")

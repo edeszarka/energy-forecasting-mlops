@@ -98,6 +98,7 @@ from pyspark.sql.types import (
 
 from src.config import CATALOG, ENTSO_E_ZONE, LAG_HOURS, MIN_TRAINING_ROWS, PATHS
 from src.features import build_feature_matrix, get_feature_columns
+from src.silver_window import filter_to_core_window
 
 # Ensure UTC consistency
 spark.conf.set("spark.sql.session.timeZone", "UTC")
@@ -235,7 +236,17 @@ temp_pd["timestamp"] = pd.to_datetime(temp_pd["timestamp"], utc=True)
 
 # Build features
 feature_pd = build_feature_matrix(load_pd, temp_pd)
-logger.info(f"Feature matrix built: {feature_pd.shape}")
+logger.info(f"Feature matrix built (pre-filter): {feature_pd.shape}")
+
+# Discard the leading max_lag-hour margin: those rows lack full backward
+# context for lag/rolling features within THIS run's fetch window. Writing
+# them would silently degrade any previously-good value for the same
+# timestamp once a future run's MERGE (Cell 11, whenMatchedUpdateAll)
+# overwrites it — every row is guaranteed to age past this margin exactly
+# once, so an unfiltered write here permanently corrupts it (see spec 009
+# §1.1). window_start and max_lag are already computed in Cell 4.
+feature_pd = filter_to_core_window(feature_pd, window_start, max_lag)
+logger.info(f"Feature matrix after margin filter: {feature_pd.shape}")
 
 # COMMAND ----------
 
