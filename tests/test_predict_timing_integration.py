@@ -82,9 +82,19 @@ class _FakeLgbmModel:
 
 
 class _FakeProphetModel:
-    """Minimal Prophet-like model whose yhat preserves input order."""
+    """Minimal Prophet-like model that mirrors real Prophet's tz-`ds` rejection.
+
+    Real Prophet raises ``ValueError`` when ``ds`` is tz-aware. Mirroring that
+    here makes the Prophet-branch test evaluative: it fails against the pre-fix
+    code (which forwarded a tz-aware ``ds`` straight through) and passes only
+    once the branch localizes ``ds`` (spec 010 AC2a).
+    """
 
     def predict(self, df):
+        if df["ds"].dt.tz is not None:
+            raise ValueError(
+                "Column ds has timezone specified, which is not supported. Remove timezone."
+            )
         return pd.DataFrame({"ds": df["ds"].values, "yhat": np.arange(len(df), dtype=float)})
 
 
@@ -183,6 +193,37 @@ def test_prophet_timestamp_and_forecast_id_are_unchanged():
     assert list(result["forecast_id"]) == expected_ids
 
 
+def test_prophet_branch_strips_timezone_before_predict():
+    """AC2(a): the Prophet branch must call predict() with a tz-naive `ds`.
+
+    `_FakeProphetModel.predict()` raises exactly as real Prophet does when given
+    a tz-aware `ds`, so this test fails against the pre-fix code (which passed
+    the tz-aware anchor index straight through) and passes only once the branch
+    localizes `ds`. Input features are deliberately tz-aware, as
+    `prepare_inference_features()` always produces (spec 010 §3.1).
+    """
+    generate_forecasts = _load_notebook_functions("generate_forecasts")["generate_forecasts"]
+    features = _make_features(24)
+    assert features.index.tz is not None  # guard: the input really is tz-aware
+
+    result = generate_forecasts(
+        model=_FakeProphetModel(),
+        model_name="energy_prophet_24h",
+        model_version="1",
+        run_id="run-prophet-tz",
+        features_df=features,
+        horizon_hours=24,
+        forecast_run_at=datetime(2026, 8, 10, tzinfo=UTC),
+        config={"pipeline_run_id": "test-run"},
+    )
+
+    assert len(result) == len(features)
+    assert result["predicted_mwh"].notna().all()
+    assert (result["predicted_mwh"] >= 0).all()
+    # Prophet anchors its target on the anchor itself (spec 006 contract).
+    assert list(result["timestamp"]) == list(features.index)
+
+
 @pytest.mark.parametrize("horizon_hours", [24, 168])
 def test_lgbm_timestamp_and_forecast_id_use_shifted_target(horizon_hours: int):
     generate_forecasts = _load_notebook_functions("generate_forecasts")["generate_forecasts"]
@@ -227,6 +268,32 @@ def test_lgbm_forecast_id_differs_from_anchor_based_id():
 
     old_ids = [_fid("energy_lgbm_24h", 24, anchor) for anchor in features.index]
     assert list(result["forecast_id"]) != old_ids
+
+
+def test_lgbm_branch_unaffected_by_prophet_timezone_fix():
+    """AC2(c): the Prophet-path tz strip must not alter the LGBM branch.
+
+    Regression guard for the pre-existing LGBM behavior (shifted target
+    timestamps + raw model predictions); complements the parametrized LGBM
+    tests above without weakening any of their assertions.
+    """
+    generate_forecasts = _load_notebook_functions("generate_forecasts")["generate_forecasts"]
+    features = _make_features(24)
+
+    result = generate_forecasts(
+        model=_FakeLgbmModel(),
+        model_name="energy_lgbm_24h",
+        model_version="1",
+        run_id="run-lgbm-guard",
+        features_df=features,
+        horizon_hours=24,
+        forecast_run_at=datetime(2026, 8, 10, tzinfo=UTC),
+        config={"pipeline_run_id": "test-run"},
+    )
+
+    shifted = [anchor + pd.Timedelta(hours=24) for anchor in features.index]
+    assert list(result["timestamp"]) == shifted
+    assert list(result["predicted_mwh"]) == [float(v) + 10.0 for v in range(len(features))]
 
 
 # ────────────────────────────── AC3 ──────────────────────────────

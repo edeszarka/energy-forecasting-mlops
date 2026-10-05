@@ -88,3 +88,59 @@ def test_shuffled_input_matches_sorted_but_naive_shift_differs(horizon_hours: in
     naive_shuffled = shuffled_df["value_mwh"].shift(-horizon_hours)
     naive_shuffled.index = shuffled_df["timestamp"]
     assert not naive_shuffled.sort_index().equals(correct_target)
+
+
+# ── AC4(b): gaps must not upcast unrelated typed (bool) columns ─────────────
+
+
+def _hourly_with_bool(n: int, start: str = "2026-08-01T00:00:00+00:00") -> pd.DataFrame:
+    index = pd.date_range(start=start, periods=n, freq="h", tz="UTC")
+    values = np.arange(n, dtype=float) + 10.0
+    return pd.DataFrame(
+        {
+            "timestamp": index,
+            "value_mwh": values,
+            "is_weekend": index.dayofweek >= 5,
+        }
+    )
+
+
+def _old_build_horizon_target(df: pd.DataFrame, horizon_hours: int) -> pd.DataFrame:
+    """Inline pre-fix (whole-frame-reindex) implementation, reproduced here.
+
+    Not imported or called from ``src`` — the old code path no longer exists in
+    the repo. It is duplicated so the same input can be run through both the
+    fixed and the old logic to prove the dtype defect was real (spec 010 AC4b).
+    """
+    df = df.sort_values("timestamp").copy()
+    tz = df["timestamp"].dt.tz
+    full_range = pd.date_range(
+        start=df["timestamp"].min(), end=df["timestamp"].max(), freq="h", tz=tz
+    )
+    original_timestamps = set(df["timestamp"])
+    df = df.set_index("timestamp").reindex(full_range)
+    df["target"] = df["value_mwh"].shift(-horizon_hours)
+    df = df.reset_index().rename(columns={"index": "timestamp"})
+    return df[df["timestamp"].isin(original_timestamps)]
+
+
+def test_gap_does_not_upcast_bool_column_but_old_logic_did():
+    full = _hourly_with_bool(400)
+    gap_hour = full["timestamp"].iloc[300]
+    gapped = full[full["timestamp"] != gap_hour].reset_index(drop=True)
+    assert gapped["is_weekend"].dtype == bool
+
+    # Fixed implementation: only `value_mwh` is reindexed, so the bool column
+    # is never touched by gap-filling and keeps its dtype.
+    fixed = build_horizon_target(gapped, 24)
+    assert fixed["is_weekend"].dtype == bool
+    # The target contract itself is unchanged (NaN at the missing target hour).
+    anchor = gap_hour - pd.Timedelta(hours=24)
+    fixed_by_ts = fixed.set_index("timestamp")["target"]
+    assert anchor in fixed_by_ts.index
+    assert pd.isna(fixed_by_ts.loc[anchor])
+
+    # Old implementation on the same input: whole-frame reindex inserts an
+    # all-NaN gap row, upcasting the bool column to object.
+    old = _old_build_horizon_target(gapped, 24)
+    assert old["is_weekend"].dtype == object

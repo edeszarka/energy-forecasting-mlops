@@ -109,6 +109,15 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
     X_val, y_val = val_df[FEATURE_COLS], val_df["target"]
     X_test, y_test = test_df[FEATURE_COLS], test_df["target"]
 
+    # Defensive: keep boolean features as real bool even if an upstream step
+    # upcasts them to object (e.g. a gap-driven reindex); LightGBM's dtype
+    # check rejects object columns. Second line of defense (spec 010 §5.2).
+    bool_cast = {c: bool for c in ("is_weekend", "is_holiday") if c in FEATURE_COLS}
+    if bool_cast:
+        X_train = X_train.astype(bool_cast)
+        X_val = X_val.astype(bool_cast)
+        X_test = X_test.astype(bool_cast)
+
     with mlflow.start_run(run_name=f"lgbm_{horizon_hours}h", nested=True) as run:
         # Optuna tuning (skip if n_trials == 0)
         tuned_params = {}

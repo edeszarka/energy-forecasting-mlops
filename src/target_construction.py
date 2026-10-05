@@ -25,12 +25,20 @@ def build_horizon_target(df: pd.DataFrame, horizon_hours: int) -> pd.DataFrame:
     full_range = pd.date_range(
         start=df["timestamp"].min(), end=df["timestamp"].max(), freq="h", tz=tz
     )
-    original_timestamps = set(df["timestamp"])
 
-    df = df.set_index("timestamp").reindex(full_range)
-    df["target"] = df["value_mwh"].shift(-horizon_hours)
+    # Reindex and shift ONLY the value series needed for the target.
+    # Reindexing the WHOLE frame (the prior implementation) inserts an
+    # all-NaN row for every gap hour across every column — including typed
+    # columns like bool, which a plain NumPy array can't hold NaN in, so
+    # they upcast to object. Filtering the gap rows back out afterward
+    # does not revert that upcast (spec 010 §1.2). Mapping the target back
+    # onto the original, never-reindexed rows touches no column but the
+    # new `target` itself.
+    value_by_ts = df.set_index("timestamp")["value_mwh"]
+    target_by_ts = value_by_ts.reindex(full_range).shift(-horizon_hours)
+    df["target"] = df["timestamp"].map(target_by_ts)
 
-    df = df.reset_index().rename(columns={"index": "timestamp"})
-    df = df[df["timestamp"].isin(original_timestamps)]
-
-    return df
+    # Deterministic RangeIndex (timestamp-sorted) so output is independent of
+    # the input row order — the prior reindex path reset to a fresh index too,
+    # and spec 007's order-independence guard asserts it (spec 010 §3.2).
+    return df.reset_index(drop=True)
