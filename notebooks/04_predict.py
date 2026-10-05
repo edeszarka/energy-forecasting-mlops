@@ -299,6 +299,12 @@ def generate_forecasts(
         preds = np.clip(model.predict(X), a_min=0, a_max=None)
     else:  # Prophet
         p_df = X.reset_index().rename(columns={"timestamp": "ds"})
+        # Prophet rejects tz-aware ds outright; 05_train_prophet.py strips tz
+        # at training time (tz_localize(None)) — this path never had the
+        # equivalent, and was never exercised against it until spec 009's
+        # remediation first forced LGBM-fallback traffic onto Prophet
+        # (spec 010 §1.1).
+        p_df["ds"] = pd.to_datetime(p_df["ds"]).dt.tz_localize(None)
         forecast = model.predict(p_df)
         preds = forecast["yhat"].clip(lower=0).values
 
