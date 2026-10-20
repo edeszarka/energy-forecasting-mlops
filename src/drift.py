@@ -5,8 +5,15 @@ This module provides functions to extract results from monitoring reports
 and calculate performance degradation metrics.
 """
 
+from datetime import datetime
+from typing import TypeAlias
+
 import numpy as np
 import pandas as pd
+
+from src.promotion import to_naive_utc
+
+TimestampLike: TypeAlias = datetime | pd.Timestamp | str
 
 
 def extract_drift_results(report_dict: dict) -> dict:
@@ -98,14 +105,9 @@ def select_drift_columns(feature_columns: list[str]) -> list[str]:
     return [c for c in feature_columns if c not in DRIFT_EXCLUDED_FEATURES]
 
 
-def _naive_utc(ts) -> pd.Timestamp:
-    ts = pd.Timestamp(ts)
-    return ts.tz_convert("UTC").tz_localize(None) if ts.tzinfo is not None else ts
-
-
 def count_consecutive_drift_hours(
-    history: list[tuple],
-    check_time,
+    history: list[tuple[TimestampLike, bool]],
+    check_time: TimestampLike,
     current_any_drift: bool,
 ) -> int:
     """Counts consecutive HOURLY drift checks ending at `check_time`.
@@ -118,9 +120,9 @@ def count_consecutive_drift_hours(
     if not current_any_drift:
         return 0
 
-    drift_by_hour = {_naive_utc(ts).floor("h"): bool(flag) for ts, flag in history}
+    drift_by_hour = {to_naive_utc(ts).floor("h"): bool(flag) for ts, flag in history}
     count = 1
-    expected = _naive_utc(check_time).floor("h") - pd.Timedelta(hours=1)
+    expected = to_naive_utc(check_time).floor("h") - pd.Timedelta(hours=1)
     while drift_by_hour.get(expected):
         count += 1
         expected -= pd.Timedelta(hours=1)
@@ -131,10 +133,10 @@ def decide_retrain(
     any_drift: bool,
     consecutive_hours: int,
     consecutive_hours_threshold: int,
-    now,
-    last_retrain_at=None,
+    now: TimestampLike,
+    last_retrain_at: TimestampLike | None = None,
     cooldown_hours: float = 24,
-    pending_since=None,
+    pending_since: TimestampLike | None = None,
     pending_timeout_hours: float = 6,
 ) -> tuple[bool, str]:
     """Pure retrain-trigger decision for 03_drift_check.
@@ -153,14 +155,14 @@ def decide_retrain(
             f"Drift detected for {consecutive_hours}h (threshold: {consecutive_hours_threshold}h).",
         )
 
-    now = _naive_utc(now)
+    now = to_naive_utc(now)
     if last_retrain_at is not None:
-        hours_since = (now - _naive_utc(last_retrain_at)).total_seconds() / 3600
+        hours_since = (now - to_naive_utc(last_retrain_at)).total_seconds() / 3600
         if hours_since < cooldown_hours:
             return False, f"Cooldown active: last retrain {hours_since:.1f}h ago."
 
     if pending_since is not None:
-        pending_hours = (now - _naive_utc(pending_since)).total_seconds() / 3600
+        pending_hours = (now - to_naive_utc(pending_since)).total_seconds() / 3600
         if pending_hours < pending_timeout_hours:
             return False, f"Retrain already pending ({pending_hours:.1f}h old)."
 
