@@ -1,6 +1,6 @@
 # Energy Consumption Forecasting — MLOps Pipeline on Databricks
 
-End-to-end forecasting pipeline for Hungarian electricity consumption using live ENTSO-E data, Databricks, Delta Lake, and MLflow. Hourly predictions, weekly retraining with drift signals, CI/CD via GitHub Actions.
+End-to-end forecasting pipeline for Hungarian electricity consumption using live ENTSO-E data, Databricks, Delta Lake, and MLflow. Hourly predictions, drift-triggered retraining (plus a weekly safety-net run), CI/CD via GitHub Actions.
 
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![Databricks](https://img.shields.io/badge/Platform-Databricks-orange.svg)](https://www.databricks.com/)
@@ -107,12 +107,12 @@ The 14 features used for model input (`src/config.py` `MODEL_INPUT_FEATURES`): t
 LightGBM training uses Optuna hyperparameter optimization with 25 trials by default. Each trial is evaluated with a custom time-ordered 3-fold cross-validation, a 168-hour gap between train and test folds, and a 120-row test window per fold; the search covers eight parameters including the objective (`regression`, `regression_l1`, `huber`). Tuning requires at least 984 training rows (`3 × (120 + 168) + 120`).
 
 ### Champion/Challenger Pattern
-Every retraining run produces a "Challenger" model. The `07_evaluate` notebook compares the Challenger's MAPE against the current "Production" model ("Champion"). A Challenger is promoted only if it achieves >1% relative MAPE improvement. The `08_promote_model` notebook tags the winning run with `production=true` (run-based MLOps pattern, since Free Edition blocks `mlflow.register_model()`).
+Every retraining run produces a "Challenger" model. The `07_evaluate` notebook loads the run currently tagged `production=true` ("Champion") and scores **both** models on the same rows — the Challenger's logged backtest rows whose targets the Champion never saw during fitting (`served_data_end`) — so a harder post-drift window cannot bias the comparison. A Challenger is promoted only if it achieves >1% relative MAPE improvement; otherwise the Champion stays and nothing changes in production. Runs from before spec 011 have no backtest artifact and fall back to logged metrics (`comparison_method = logged_metrics`). The `08_promote_model` notebook tags the winning run with `production=true` (run-based MLOps pattern, since Free Edition blocks `mlflow.register_model()`).
 
 ## MLOps Design
 
 ### Drift Detection
-Drift monitoring uses Evidently AI's `DataDriftPreset` in `03_drift_check`. It detects statistical shifts in features and target distributions. If drift persists for 3 consecutive hours, `03_drift_check` writes a durable, deduplicated retrain flag to a Volume, subject to a 24-hour cooldown. The flag is consumed by `08_promote_model.py` for audit metadata; retraining itself runs on the fixed weekly schedule.
+Drift monitoring uses Evidently AI's `DataDriftPreset` in `03_drift_check`. It detects statistical shifts in the target and non-calendar features (calendar columns such as `month` differ between any two windows by construction and are excluded). The reference window is the production run's training window. If drift persists for 3 consecutive hourly checks (a missing hour breaks the streak), `03_drift_check` starts `energy_retraining_pipeline` directly via the Jobs API (fire-and-forget, so hourly forecasts are never blocked), subject to a 24-hour cooldown, and writes a retrain flag that marks the request as pending. `08_promote_model.py` deletes the flag at the end of a successful retrain; a flag older than 6 hours is treated as stale so a failed retrain cannot block future triggers.
 
 ### CI/CD
 
@@ -152,10 +152,12 @@ energy-forecasting-mlops/
 │   ├── baseline.py                 # Naive baseline metrics
 │   ├── config.py                   # Central constants, paths, thresholds
 │   ├── dashboard.py                # Streamlit dashboard
-│   ├── drift.py                    # Drift result extraction + MAE logic
+│   ├── drift.py                    # Drift extraction, MAE, retrain trigger rules (spec 011)
 │   ├── features.py                 # Feature engineering (18 columns)
 │   ├── forecast_timing.py          # Inference anchor → target timestamp (spec 006)
 │   ├── ingest_discovery.py         # Volume backlog selection (spec 008)
+│   ├── promotion.py                # Champion/challenger comparison (spec 011)
+│   ├── retrain_trigger.py          # Starts the retraining job on drift (spec 011)
 │   ├── splits.py                   # Train/val/test + rolling-origin splits
 │   ├── target_construction.py      # Time-aligned horizon target (spec 007)
 │   └── tuning.py                   # Optuna search space + CV
@@ -208,7 +210,8 @@ databricks bundle deploy --target prod
 
 ### Pipeline Execution
 - **Hourly**: GitHub Actions fetches data → uploads to UC Volumes → triggers Databricks `energy_hourly_pipeline` (ingest → transform → drift_check → predict)
-- **Weekly**: `energy_retraining_pipeline` runs Sundays 02:00 UTC (train → evaluate → promote); drift signals are consumed for audit metadata during the scheduled cycle
+- **On drift**: `03_drift_check` starts `energy_retraining_pipeline` (train → evaluate → promote) after 3 consecutive hours of drift
+- **Weekly**: the same job also runs Sundays 02:00 UTC as a safety net
 
 ## Dashboard
 

@@ -112,6 +112,9 @@ if root_path not in sys.path:
     sys.path.append(root_path)
 
 from src.config import MODEL_INPUT_FEATURES, PATHS, RETRAIN_FLAG_PATH, SCHEMA
+from src.drift import count_consecutive_drift_hours, decide_retrain, select_drift_columns
+from src.promotion import pick_production_run
+from src.retrain_trigger import trigger_retraining_job
 
 # COMMAND ----------
 
@@ -123,6 +126,10 @@ dbutils.widgets.text("drift_threshold", "0.15")
 dbutils.widgets.text("consecutive_hours_threshold", "3")
 dbutils.widgets.text("current_window_days", "7")
 dbutils.widgets.text("min_rows_for_drift", "100")
+# Job id of energy_retraining_pipeline; injected by databricks.yml. Empty = flag only.
+dbutils.widgets.text("retraining_job_id", "")
+dbutils.widgets.text("retrain_cooldown_hours", "24")
+dbutils.widgets.text("pending_timeout_hours", "6")
 
 CONFIG = {
     "silver_table": PATHS.table_silver,
@@ -134,8 +141,13 @@ CONFIG = {
     "consecutive_hours_threshold": int(dbutils.widgets.get("consecutive_hours_threshold")),
     "current_window_days": int(dbutils.widgets.get("current_window_days")),
     "min_rows_for_drift": int(dbutils.widgets.get("min_rows_for_drift")),
+    "retraining_job_id": dbutils.widgets.get("retraining_job_id").strip(),
+    "retrain_cooldown_hours": float(dbutils.widgets.get("retrain_cooldown_hours")),
+    "pending_timeout_hours": float(dbutils.widgets.get("pending_timeout_hours")),
     "primary_model_name": "energy_lgbm_24h",
     "feature_columns": MODEL_INPUT_FEATURES,  # sourced from src/config.py
+    # Calendar features are excluded from the drift test (spec 011 §1.4)
+    "drift_columns": select_drift_columns(MODEL_INPUT_FEATURES),
     "target_column": "value_mwh",
 }
 
@@ -182,19 +194,29 @@ def get_reference_window(
     Returns (reference_df, source_description, start_date, end_date).
     """
     try:
-        # Get Production model training window from MLflow
-        prod_version = mlflow_client.get_latest_versions(
-            config["primary_model_name"], stages=["Production"]
-        )[0]
-        run = mlflow_client.get_run(prod_version.run_id)
+        # Promotion is tag-based (no Model Registry on Free Edition), so look up the
+        # production run the same way 04_predict does (spec 011 §1.7).
+        runs = mlflow_client.search_runs(
+            experiment_ids=[e.experiment_id for e in mlflow_client.search_experiments()],
+            filter_string=(
+                f"tags.model_name = '{config['primary_model_name']}' "
+                "AND tags.production = 'true' AND tags.leak_affected = 'false'"
+            ),
+            max_results=50,
+        )
+        run = pick_production_run(runs)
+        if run is None:
+            raise LookupError(f"No production run for {config['primary_model_name']}")
 
-        # Notebook 06 logs training_data_end tag and run start_time
-        training_end = datetime.fromisoformat(run.data.tags.get("training_data_end")).replace(
+        # Notebooks 05/06 log the training window as tags
+        training_end = datetime.fromisoformat(run.data.tags["training_data_end"]).replace(
             tzinfo=UTC
         )
-        training_start = datetime.fromtimestamp(run.info.start_time / 1000.0, tz=UTC)
+        training_start = datetime.fromisoformat(run.data.tags["training_data_start"]).replace(
+            tzinfo=UTC
+        )
 
-        source = "mlflow_training_window"
+        source = f"mlflow_training_window (run {run.info.run_id})"
     except Exception as e:
         logger.warning(f"Could not retrieve MLflow Production window: {e}. Using fallback.")
         training_end = datetime.now(UTC) - timedelta(days=7)
@@ -256,7 +278,10 @@ def run_data_drift(
     """
     report = Report(
         metrics=[
-            DataDriftPreset(drift_share=config["drift_threshold"]),
+            DataDriftPreset(
+                columns=[config["target_column"]] + config["drift_columns"],
+                drift_share=config["drift_threshold"],
+            ),
             ColumnDriftMetric(column_name=config["target_column"]),
             ColumnDriftMetric(column_name="temperature_c"),
         ]
@@ -355,35 +380,46 @@ def run_prediction_drift(
 # ────────────────────────────────────────
 
 
-def get_consecutive_drift_hours(spark: SparkSession, config: dict, current_any_drift: bool) -> int:
+def get_consecutive_drift_hours(
+    spark: SparkSession, config: dict, check_time: datetime, current_any_drift: bool
+) -> int:
     """
-    Counts consecutive hours of drift from history.
+    Counts consecutive HOURLY drift checks; a missing hour breaks the streak.
     """
     try:
         history = (
             spark.table(config["drift_table"])
             .orderBy(F.col("check_timestamp").desc())
             .limit(72)
-            .select("any_drift_detected")
+            .select("check_timestamp", "any_drift_detected")
             .collect()
         )
+        pairs = [(row[0], row[1]) for row in history]
+    except Exception as e:
+        logger.warning(f"Could not read drift history: {e}")
+        pairs = []
 
-        count = 0
-        for row in history:
-            if row[0]:  # any_drift_detected was True
-                count += 1
-            else:
-                break
-
-        return count + 1 if current_any_drift else 0
-    except Exception:
-        return 1 if current_any_drift else 0
+    return count_consecutive_drift_hours(pairs, check_time, current_any_drift)
 
 
 # COMMAND ----------
 
 # SECTION 7 — RETRAINING TRIGGER
 # ─────────────────────────────────
+
+
+def read_pending_since(config: dict) -> datetime | None:
+    """Returns when the outstanding retrain request was written, if any."""
+    path = Path(config["flag_path"])
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            return datetime.fromisoformat(json.load(f)["triggered_at"])
+    except Exception as e:
+        # An unreadable flag must not block triggering forever.
+        logger.warning(f"Unreadable retrain flag {path}: {e}. Treating as stale.")
+        return None
 
 
 def should_trigger_retrain(
@@ -394,18 +430,9 @@ def should_trigger_retrain(
     drifted_features: list[str],
 ) -> tuple[bool, str]:
     """
-    Enforces trigger conditions and cooldown.
+    Enforces trigger conditions, cooldown and pending-request timeout.
     """
-    if not any_drift_detected:
-        return False, "No drift detected."
-
-    if consecutive_hours < config["consecutive_hours_threshold"]:
-        return (
-            False,
-            f"Drift detected for {consecutive_hours}h (threshold: {config['consecutive_hours_threshold']}h).",
-        )
-
-    # Check cooldown (24h)
+    last_retrain_at = None
     try:
         last_retrain = (
             spark.table(config["drift_table"])
@@ -415,24 +442,24 @@ def should_trigger_retrain(
             .select("check_timestamp")
             .collect()
         )
-
         if last_retrain:
-            hours_since = (
-                datetime.now(UTC) - last_retrain[0][0].replace(tzinfo=UTC)
-            ).total_seconds() / 3600
-            if hours_since < 24:
-                return False, f"Cooldown active: last retrain {hours_since:.1f}h ago."
-    except Exception:
-        pass
+            last_retrain_at = last_retrain[0][0]
+    except Exception as e:
+        logger.warning(f"Could not read last retrain time (cooldown not applied): {e}")
 
-    # Check for existing flag
-    if os.path.exists(config["flag_path"]):
-        return False, "Retrain already pending (flag exists)."
-
-    return (
-        True,
-        f"Drift detected for {consecutive_hours} consecutive hours in features: {', '.join(drifted_features)}.",
+    should, reason = decide_retrain(
+        any_drift=any_drift_detected,
+        consecutive_hours=consecutive_hours,
+        consecutive_hours_threshold=config["consecutive_hours_threshold"],
+        now=datetime.now(UTC),
+        last_retrain_at=last_retrain_at,
+        cooldown_hours=config["retrain_cooldown_hours"],
+        pending_since=read_pending_since(config),
+        pending_timeout_hours=config["pending_timeout_hours"],
     )
+    if should and drifted_features:
+        reason = f"{reason} Drifted features: {', '.join(drifted_features)}."
+    return should, reason
 
 
 # COMMAND ----------
@@ -441,16 +468,24 @@ def should_trigger_retrain(
 # ──────────────────────────────
 
 
-def write_retrain_flag(config: dict, reason: str, consecutive_hours: int, drifted_features: list):
+def write_retrain_flag(
+    config: dict,
+    reason: str,
+    consecutive_hours: int,
+    drifted_features: list,
+    job_run_id: int | None = None,
+):
     """
-    Writes JSON flag file to Volume.
+    Writes JSON flag file to Volume. It marks the request as pending until
+    08_promote_model deletes it (or it ages past pending_timeout_hours).
     """
     flag_data = {
         "triggered_at": datetime.now(UTC).isoformat(),
         "reason": reason,
         "consecutive_drift_hours": consecutive_hours,
         "drifted_features": drifted_features,
-        "pipeline_version": "1.0",
+        "job_run_id": job_run_id,
+        "pipeline_version": "2.0",
     }
 
     path = Path(config["flag_path"])
@@ -530,15 +565,34 @@ data_drift = run_data_drift(ref_df, curr_df, CONFIG)
 pred_drift = run_prediction_drift(spark, CONFIG, window_start, window_end, ref_start, ref_end)
 
 any_drift = data_drift["dataset_drift"] or pred_drift["prediction_drift_detected"]
-consecutive_hours = get_consecutive_drift_hours(spark, CONFIG, any_drift)
+consecutive_hours = get_consecutive_drift_hours(spark, CONFIG, check_time, any_drift)
 
 # Trigger Retraining
 should_retrain, retrain_reason = should_trigger_retrain(
     spark, CONFIG, consecutive_hours, any_drift, data_drift["drifted_features"]
 )
 
+retrain_run_id = None
 if should_retrain:
-    write_retrain_flag(CONFIG, retrain_reason, consecutive_hours, data_drift["drifted_features"])
+    if CONFIG["retraining_job_id"]:
+        try:
+            retrain_run_id, msg = trigger_retraining_job(int(CONFIG["retraining_job_id"]))
+            logger.info(msg)
+        except Exception as e:
+            # Not raising: predict depends on this task. With retrain_triggered=False
+            # and no flag written, the next hourly check simply retries.
+            logger.error(f"Failed to start retraining job: {e}")
+            should_retrain = False
+            retrain_reason = f"Trigger failed: {e}"
+    else:
+        logger.warning(
+            "retraining_job_id not set — writing flag only (weekly retrain picks it up)."
+        )
+
+if should_retrain:
+    write_retrain_flag(
+        CONFIG, retrain_reason, consecutive_hours, data_drift["drifted_features"], retrain_run_id
+    )
     logger.info(f"RETRAINING TRIGGERED: {retrain_reason}")
 else:
     logger.info(f"No retraining triggered. Reason: {retrain_reason}")
@@ -593,7 +647,8 @@ print(f"""
 │ MAE current window:        {result_row["prediction_mae_current"] if result_row["prediction_mae_current"] else "N/A"} MWh
 │ MAE reference window:      {result_row["prediction_mae_reference"] if result_row["prediction_mae_reference"] else "N/A"} MWh
 │ Consecutive drift hours:   {consecutive_hours}
-│ Retrain triggered:         {should_retrain}
+│ Retrain triggered:         {should_retrain} (job run: {retrain_run_id or "N/A"})
+│ Retrain decision:          {retrain_reason}
 │ HTML report:               {report_path}
 └─────────────────────────────────────────────────┘
 """)
