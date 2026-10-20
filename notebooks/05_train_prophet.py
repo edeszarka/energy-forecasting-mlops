@@ -53,6 +53,7 @@ from pyspark.sql import functions as F
 
 from src.baseline import compute_naive_baseline_metrics
 from src.config import CATALOG, PATHS
+from src.promotion import BACKTEST_ARTIFACT
 from src.splits import make_prophet_rolling_origins
 
 # COMMAND ----------
@@ -96,6 +97,7 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str) -
     all_actual = []
     all_pred = []
     all_baseline = []
+    all_ds = []
     fold_cutoffs = []
     fold_train_sizes = []
 
@@ -132,6 +134,7 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str) -
 
         all_actual.extend(fold_target["y"].values)
         all_pred.extend(forecast["yhat"].values)
+        all_ds.extend(fold_target["ds"].values)
         baseline_column = f"lag_{horizon_hours}h"
         all_baseline.extend(fold_target[baseline_column].values)
 
@@ -182,6 +185,23 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str) -
         mlflow.set_tag("evaluation_method", "rolling_origin")
         mlflow.set_tag("n_folds", str(n_folds))
         mlflow.set_tag("fold_cutoffs", ",".join(fold_cutoffs))
+        # The served model below is fitted on ALL rows, so its data end is the
+        # frame's last timestamp, not training_data_end (spec 011 §1.6).
+        mlflow.set_tag("served_data_end", df["ds"].max().isoformat())
+
+        # Per-row backtest predictions: 07_evaluate scores the champion on the
+        # same target timestamps for a like-for-like comparison (spec 011 §1.3).
+        # Prophet's ds IS the target timestamp.
+        ds_iso = [pd.Timestamp(t).isoformat() for t in all_ds]
+        mlflow.log_dict(
+            {
+                "timestamp": ds_iso,
+                "target_timestamp": ds_iso,
+                "actual": [float(v) for v in y_true],
+                "predicted": [float(v) for v in y_pred],
+            },
+            BACKTEST_ARTIFACT,
+        )
 
         # Log model - retrain on all available data for serving
         # Served model trains on all available data (unlike the evaluation folds,

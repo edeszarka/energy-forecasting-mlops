@@ -21,7 +21,7 @@ if root_path not in sys.path:
 
 # %% [markdown]
 # # 08_promote_model
-# **Purpose:** Automate model promotion from Staging/None to Production using Champion/Challenger logic.
+# **Purpose:** Apply 07_evaluate's Champion/Challenger decision via MLflow run tags (spec 011).
 # **Inputs:**
 # - `workspace.energy_forecasting.model_evaluation`
 # - `workspace.energy_forecasting.drift_control`
@@ -56,6 +56,7 @@ from pyspark.sql.types import (
 from pyspark.sql.window import Window
 
 from src.config import CATALOG, PATHS, RETRAIN_FLAG_PATH
+from src.promotion import pick_production_run
 
 # COMMAND ----------
 
@@ -102,9 +103,16 @@ def load_latest_evaluation(spark: SparkSession, config: dict) -> pd.DataFrame:
     # Use window function to get latest evaluated_at per model_name
     window = Window.partitionBy("model_name").orderBy(F.col("evaluated_at").desc())
 
+    eval_sdf = spark.table(config["eval_table"])
+    if "comparison_method" not in eval_sdf.columns:
+        logger.info("Evaluation table has no spec-011 rows yet. Skipping.")
+        return pd.DataFrame()
+
+    # Pre-spec-011 rows were never marked processed (UPDATE used a non-existent
+    # column) and their challenger_wins came from a biased comparison — ignore them.
     eval_df = (
-        spark.table(config["eval_table"])
-        .filter(~F.col("promoted"))
+        eval_sdf.filter(~F.col("promoted"))
+        .filter(F.col("comparison_method").isNotNull())
         .withColumn("rn", F.row_number().over(window))
         .filter(F.col("rn") == 1)
         .drop("rn")
@@ -123,74 +131,62 @@ def load_latest_evaluation(spark: SparkSession, config: dict) -> pd.DataFrame:
 # ───────────────────────────────────────
 
 
+def get_production_runs(model_name: str, mlflow_client: MlflowClient) -> list:
+    """All runs currently tagged production=true for a model (normally exactly one)."""
+    return mlflow_client.search_runs(
+        experiment_ids=[r.experiment_id for r in mlflow_client.search_experiments()],
+        filter_string=(
+            f"tags.model_name = '{model_name}' AND tags.production = 'true' "
+            "AND tags.leak_affected = 'false'"
+        ),
+        max_results=50,
+    )
+
+
 def decide_promotions(
     eval_df: pd.DataFrame, mlflow_client: MlflowClient, config: dict
 ) -> list[dict]:
     """
-    Applies Champion/Challenger rules using MLflow Run tags (production=true).
+    Acts on 07_evaluate's same-window champion/challenger decision. If 07 found the
+    champion better, nothing changes in production.
     """
     decisions = []
 
     for _, row in eval_df.iterrows():
         model_name = row["model_name"]
-        challenger_mape = row["challenger_mape"]
-        challenger_run_id = row["challenger_run_id"]
+        eval_champion_id = row["champion_run_id"] if pd.notna(row["champion_run_id"]) else None
 
-        # Get current 'Production' run by searching tags
         try:
-            prod_runs = mlflow_client.search_runs(
-                experiment_ids=[r.experiment_id for r in mlflow_client.search_experiments()],
-                filter_string=f"tags.model_name = '{model_name}' AND tags.production = 'true' AND tags.leak_affected = 'false'",
-                max_results=1,
-            )
-            champion = prod_runs[0] if prod_runs else None
-
-            if champion:
-                champion_mape = champion.data.metrics.get("mape")
-                champion_run_id = champion.info.run_id
-            else:
-                champion_mape = None
-                champion_run_id = None
-
+            current = pick_production_run(get_production_runs(model_name, mlflow_client))
         except Exception as e:
             logger.warning(f"Error querying production run for {model_name}: {e}")
             continue
+        current_id = current.info.run_id if current else None
 
-        # Decision Logic
-        first_run = champion_mape is None or champion_mape == 0.0
-        should_promote = False
-        reason = ""
-
+        reason = row["decision_reason"] if pd.notna(row["decision_reason"]) else ""
         if config["force_promote"]:
-            should_promote = True
-            reason = "Force promotion requested via widget"
-        elif first_run:
-            should_promote = True
-            reason = "No Production version exists — promoting unconditionally"
-        elif challenger_mape is None or pd.isna(challenger_mape):
+            should_promote, reason = True, "Force promotion requested via widget"
+        elif current_id == row["challenger_run_id"]:
+            should_promote, reason = False, "Challenger is already production — nothing to do"
+        elif current_id != eval_champion_id:
+            # Production changed after 07 ran; its comparison is against a stale champion.
             should_promote = False
-            reason = "Invalid challenger metrics — promotion skipped"
+            reason = (
+                f"Production run changed since evaluation ({eval_champion_id} -> {current_id})"
+                " — skipping, re-evaluate on the next retrain"
+            )
         else:
-            # Relative improvement comparison
-            threshold = config["mape_threshold"]
-            improvement = (champion_mape - challenger_mape) / champion_mape
-
-            if improvement > threshold:
-                should_promote = True
-                reason = f"MAPE improved by {improvement:.2%} ({champion_mape:.3f}% -> {challenger_mape:.3f}%)"
-            else:
-                should_promote = False
-                reason = f"Insufficient improvement ({improvement:.2%} < {threshold:.2%}). Keeping champion."
+            should_promote = bool(row["challenger_wins"])
 
         decisions.append(
             {
                 "model_name": model_name,
-                "challenger_run_id": challenger_run_id,
-                "challenger_mape": challenger_mape,
-                "champion_run_id": champion_run_id,
-                "champion_mape": champion_mape,
+                "challenger_run_id": row["challenger_run_id"],
+                "challenger_mape": row["challenger_mape"],
+                "champion_run_id": current_id,
+                "champion_mape": row["champion_mape"],
                 "should_promote": should_promote,
-                "first_run": first_run,
+                "first_run": bool(row["first_run"]),
                 "promotion_reason": reason,
             }
         )
@@ -206,8 +202,10 @@ def decide_promotions(
 
 def execute_promotions(decisions: list, mlflow_client: MlflowClient, config: dict) -> list[dict]:
     """
-    Simulates promotion by tagging winning runs with production=true and
-    removing that tag from former champions.
+    Tags the winning run production=true, then demotes every other production run
+    of that model. Tagging the new run first means a crash in between leaves two
+    production runs (resolved by pick_production_run's promoted_at ordering)
+    rather than none.
     """
     if config["dry_run"]:
         logger.info("DRY RUN: Skipping actual MLflow tag updates.")
@@ -218,18 +216,15 @@ def execute_promotions(decisions: list, mlflow_client: MlflowClient, config: dic
             continue
 
         try:
-            # 1. Remove production tag from old champion
-            if d["champion_run_id"]:
-                mlflow_client.set_tag(d["champion_run_id"], "production", "false")
-                logger.info(f"Former champion {d['champion_run_id']} tagged production=false")
-
-            # 2. Tag new challenger as production
-            mlflow_client.set_tag(d["challenger_run_id"], "production", "true")
-
-            # Add metadata tags for prediction/drift logic
             mlflow_client.set_tag(
                 d["challenger_run_id"], "promoted_at", datetime.now(UTC).isoformat()
             )
+            mlflow_client.set_tag(d["challenger_run_id"], "production", "true")
+
+            for run in get_production_runs(d["model_name"], mlflow_client):
+                if run.info.run_id != d["challenger_run_id"]:
+                    mlflow_client.set_tag(run.info.run_id, "production", "false")
+                    logger.info(f"Former champion {run.info.run_id} tagged production=false")
 
             logger.info(
                 f"Successfully promoted {d['model_name']} (Run {d['challenger_run_id']}) via MLflow tags."
@@ -238,6 +233,7 @@ def execute_promotions(decisions: list, mlflow_client: MlflowClient, config: dic
         except Exception as e:
             logger.error(f"Failed to tag {d['model_name']}: {e}")
             d["should_promote"] = False
+            d["promotion_failed"] = True
 
     return decisions
 
@@ -259,11 +255,14 @@ def mark_promoted_in_eval_table(decisions: list, spark: SparkSession, config: di
             spark.sql(f"""
                 UPDATE {config["eval_table"]}
                 SET promoted = true
-                WHERE run_id = '{d["challenger_run_id"]}'
+                WHERE challenger_run_id = '{d["challenger_run_id"]}'
             """)
             logger.info(f"Marked run {d['challenger_run_id']} as processed in eval table.")
         except Exception as e:
-            logger.error(f"Failed to update eval table for run {d['challenger_run_id']}: {e}")
+            # Unmarked rows get re-processed on every run — fail loudly instead.
+            raise RuntimeError(
+                f"Failed to update eval table for run {d['challenger_run_id']}: {e}"
+            ) from e
 
 
 # COMMAND ----------
@@ -362,8 +361,8 @@ def write_promotion_log(
 # ────────────────────────────────
 
 
-def cleanup_flag_file(config: dict) -> dict:
-    """Reads and deletes the retrain flag file."""
+def read_flag_file(config: dict) -> dict:
+    """Reads the retrain request written by 03_drift_check (if any)."""
     p = Path(config["flag_path"])
     meta = {"triggered": False, "features": ""}
 
@@ -371,15 +370,20 @@ def cleanup_flag_file(config: dict) -> dict:
         try:
             with open(p) as f:
                 content = json.load(f)
-                meta = {"triggered": True, "features": content.get("drifted_features", [])}
-
-            if not config["dry_run"]:
-                p.unlink()
-                logger.info("Retrain flag file consumed and deleted.")
+            meta = {"triggered": True, "features": content.get("drifted_features", [])}
         except Exception as e:
-            logger.error(f"Failed to process/delete flag file: {e}")
+            logger.error(f"Failed to read flag file: {e}")
 
     return meta
+
+
+def cleanup_flag_file(config: dict) -> None:
+    """Deletes the retrain request. Called only at the very end of a successful
+    retrain, so a failed retrain leaves it for 03's pending-timeout to expire."""
+    p = Path(config["flag_path"])
+    if p.exists() and not config["dry_run"]:
+        p.unlink()
+        logger.info("Retrain flag file consumed and deleted.")
 
 
 # COMMAND ----------
@@ -395,7 +399,7 @@ if CONFIG["dry_run"]:
 
 # Load candidates
 eval_pdf = load_latest_evaluation(spark, CONFIG)
-drift_metadata = cleanup_flag_file(CONFIG)
+drift_metadata = read_flag_file(CONFIG)
 
 if not eval_pdf.empty:
     # Logic
@@ -419,7 +423,13 @@ if not eval_pdf.empty:
     )
     print("=" * 64 + "\n")
 else:
+    final_decisions = []
     logger.info("No unpromoted models to process.")
+
+cleanup_flag_file(CONFIG)
+
+if any(d.get("promotion_failed") for d in final_decisions):
+    raise RuntimeError("One or more promotions failed to apply MLflow tags — see log above.")
 
 if CONFIG["dry_run"]:
     dbutils.notebook.exit("DRY_RUN_COMPLETE")

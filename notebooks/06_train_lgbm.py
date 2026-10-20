@@ -51,6 +51,7 @@ from src.config import (
     OPTUNA_N_TRIALS,
     PATHS,
 )
+from src.promotion import BACKTEST_ARTIFACT
 from src.splits import make_holdout_splits
 from src.target_construction import build_horizon_target
 from src.tuning import run_lgbm_tuning
@@ -157,6 +158,25 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
         mlflow.set_tag("leak_affected", "false")
         mlflow.set_tag("training_data_end", training_data_end.isoformat())
         mlflow.set_tag("training_data_start", training_data_start.isoformat())
+        # Early stopping looks at the validation window, so the served model has
+        # effectively seen data up to the end of val (spec 011 §1.6).
+        mlflow.set_tag("served_data_end", val_df["timestamp"].max().isoformat())
+
+        # Per-row test predictions: 07_evaluate scores the champion on the same
+        # rows for a like-for-like comparison (spec 011 §1.3). `timestamp` is the
+        # feature anchor, `target_timestamp` the hour actually being predicted.
+        mlflow.log_dict(
+            {
+                "timestamp": [t.isoformat() for t in test_df["timestamp"]],
+                "target_timestamp": [
+                    (t + pd.Timedelta(hours=horizon_hours)).isoformat()
+                    for t in test_df["timestamp"]
+                ],
+                "actual": [float(v) for v in y_test],
+                "predicted": [float(v) for v in y_pred],
+            },
+            BACKTEST_ARTIFACT,
+        )
 
         # Artifacts
         try:
