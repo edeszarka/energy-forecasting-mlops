@@ -257,8 +257,8 @@ class OpenMeteoClient:
             }
         )
 
-        # OpenMeteo returns timestamps in the requested timezone. Convert to UTC.
-        df["timestamp"] = df["timestamp"].dt.tz_localize(OPENMETEO_TIMEZONE).dt.tz_convert("UTC")
+        # OpenMeteo returns naive timestamps in the requested timezone (UTC).
+        df["timestamp"] = df["timestamp"].dt.tz_localize(OPENMETEO_TIMEZONE)
 
         df["source"] = "openmeteo"
         df["fetched_at"] = pd.Timestamp.now(tz="UTC")

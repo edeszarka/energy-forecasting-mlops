@@ -75,14 +75,6 @@ jobs:
           nslookup transparency.entsoe.eu || echo "NSLOOKUP failed"
           curl -I https://transparency.entsoe.eu/api || echo "CURL failed"
 
-      - name: Diagnose ENTSO-E key
-        shell: bash
-        env:
-          ENTSO_E_API_KEY: ${{ secrets.ENTSO_E_API_KEY }}
-        run: |
-          echo "Key length: ${#ENTSO_E_API_KEY}"
-          echo "Key prefix: ${ENTSO_E_API_KEY:0:8}"
-
       - name: Resolve run parameters
         shell: bash
         run: |
@@ -181,48 +173,57 @@ jobs:
                   temp_status = "fetch_failed"
                   temp_error = str(e)
 
+              if temp_status == "ok" and temp_df.empty:
+                  temp_status = "empty"
+
               # 3. Segment and Save hourly files
-              file_count = 0
+              # Only hours that actually have data get a file. Uploads use
+              # --overwrite, so writing a failure wrapper or [] placeholder here
+              # could replace a good, not-yet-ingested file for the same hour
+              # (spec 012). Missing hours are re-fetched by later runs (24h lookback).
+              load_files = 0
+              temp_files = 0
               current_h = fetch_start
               while current_h < fetch_end:
                   h_start = current_h
                   h_end = current_h + timedelta(hours=1)
                   filename = h_start.strftime("%Y-%m-%dT%H-00-00Z.json")
-                  
+
                   # Load slice
-                  if load_status == "ok" and not load_df.empty:
+                  if load_status == "ok":
                       h_load = load_df[(load_df['timestamp'] >= h_start) & (load_df['timestamp'] < h_end)].copy()
                       if not h_load.empty:
                           h_load["timestamp"] = h_load["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
                           h_load["fetched_at"] = h_load["fetched_at"].dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
                           h_load.to_json(f"/tmp/load/{filename}", orient="records")
-                      else:
-                          # Missing hour in API response
-                          with open(f"/tmp/load/{filename}", "w") as f: json.dump([], f)
-                  else:
-                      # API failure wrapper
-                      with open(f"/tmp/load/{filename}", "w") as f:
-                          json.dump({"status": load_status, "error": load_error, "data": []}, f)
+                          load_files += 1
 
                   # Temperature slice
-                  if temp_status == "ok" and not temp_df.empty:
+                  if temp_status == "ok":
                       h_temp = temp_df[(temp_df['timestamp'] >= h_start) & (temp_df['timestamp'] < h_end)].copy()
                       if not h_temp.empty:
                           h_temp["timestamp"] = h_temp["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
                           h_temp["fetched_at"] = h_temp["fetched_at"].dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
                           h_temp.to_json(f"/tmp/temperature/{filename}", orient="records")
-                      else:
-                          with open(f"/tmp/temperature/{filename}", "w") as f: json.dump([], f)
-                  else:
-                      with open(f"/tmp/temperature/{filename}", "w") as f:
-                          json.dump({"status": temp_status, "error": temp_error, "data": []}, f)
-                  
-                  current_h = h_end
-                  file_count += 1
+                          temp_files += 1
 
-              print(f"Load rows fetched: {len(load_df)}")
-              print(f"Temperature rows fetched: {len(temp_df)}")
-              print(f"Files written: {file_count}")
+                  current_h = h_end
+
+              print(f"Load rows fetched: {len(load_df)} ({load_status}), files written: {load_files}")
+              print(f"Temperature rows fetched: {len(temp_df)} ({temp_status}), files written: {temp_files}")
+
+              # Recorded for the final step, which fails the run so a broken
+              # source is visible. Upload and trigger still run for whatever succeeded.
+              # Status names only: error text can span lines and would corrupt GITHUB_ENV.
+              failures = []
+              if load_status != "ok":
+                  failures.append(f"ENTSO-E load {load_status}")
+              if temp_status != "ok":
+                  failures.append(f"OpenMeteo weather {temp_status}")
+              with open(os.environ["GITHUB_ENV"], "a") as env_file:
+                  env_file.write(f"LOAD_STATUS={load_status}\n")
+                  env_file.write(f"TEMP_STATUS={temp_status}\n")
+                  env_file.write(f"FETCH_FAILURES={', '.join(failures)}\n")
 
           except Exception as fatal:
               print(f"CRITICAL ERROR in Python script: {fatal}")
@@ -307,4 +308,17 @@ jobs:
           echo "| Run date | $RUN_DATE |" >> $GITHUB_STEP_SUMMARY
           echo "| Lookback hours | $LOOKBACK_HOURS |" >> $GITHUB_STEP_SUMMARY
           echo "| Databricks run ID | ${DATABRICKS_RUN_ID:-not triggered} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Status | ✅ Files uploaded & Pipeline triggered |" >> $GITHUB_STEP_SUMMARY
+          echo "| ENTSO-E load fetch | ${LOAD_STATUS:-unknown} |" >> $GITHUB_STEP_SUMMARY
+          echo "| OpenMeteo weather fetch | ${TEMP_STATUS:-unknown} |" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$FETCH_FAILURES" ]; then
+            echo "| Status | ❌ Fetch failed: $FETCH_FAILURES |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Status | ✅ Files uploaded & Pipeline triggered |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Fail on fetch errors
+        if: env.FETCH_FAILURES != ''
+        shell: bash
+        run: |
+          echo "::error::Source fetch failed: $FETCH_FAILURES"
+          exit 1
