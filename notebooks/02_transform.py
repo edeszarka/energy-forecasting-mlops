@@ -29,6 +29,10 @@ dbutils.library.restartPython()
 # MAGIC - `workspace.energy_forecasting.silver_features`
 # MAGIC
 # MAGIC **Schedule:** Hourly, following `01_ingest`.
+# MAGIC
+# MAGIC **Rebuild mode** (manual, spec 014 T4): set `rebuild_start` and `rebuild_end` (UTC, end exclusive) to rebuild silver from bronze in 30-day chunks with `replaceWhere`; afterwards the table's `pipeline.data_version` is set to `CURRENT_DATA_VERSION`.
+# MAGIC
+# MAGIC **`dq_mode`:** `warn` logs data-quality violations; `enforce` fails before anything is written (ADR-0004).
 
 # COMMAND ----------
 
@@ -57,14 +61,18 @@ try:
     dbutils.widgets.text("lookback_hours", "720")  # must be >= MIN_TRAINING_ROWS (src/config.py)
     dbutils.widgets.text("run_date", "")
     dbutils.widgets.text("dry_run", "false")
-    dbutils.widgets.text("force_full_rebuild", "false")
+    dbutils.widgets.text("rebuild_start", "")  # empty = hourly path
+    dbutils.widgets.text("rebuild_end", "")  # exclusive; empty = current UTC hour
+    dbutils.widgets.text("dq_mode", "warn")  # warn | enforce (spec 014 T5)
 except NameError:
     pass
 
 lookback_hours = int(dbutils.widgets.get("lookback_hours"))
 run_date_raw = dbutils.widgets.get("run_date")
 dry_run = dbutils.widgets.get("dry_run").lower() == "true"
-force_full_rebuild = dbutils.widgets.get("force_full_rebuild").lower() == "true"
+rebuild_start_raw = dbutils.widgets.get("rebuild_start")
+rebuild_end_raw = dbutils.widgets.get("rebuild_end")
+dq_mode = dbutils.widgets.get("dq_mode")
 
 if not run_date_raw:
     run_date = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
@@ -74,7 +82,8 @@ else:
 print(f"Resolved run_date: {run_date}")
 print(f"Lookback hours: {lookback_hours}")
 print(f"Dry run: {dry_run}")
-print(f"Force full rebuild: {force_full_rebuild}")
+print(f"Rebuild: {rebuild_start_raw or '-'} -> {rebuild_end_raw or '-'}")
+print(f"DQ mode: {dq_mode}")
 
 # COMMAND ----------
 
@@ -96,9 +105,19 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-from src.config import CATALOG, ENTSO_E_ZONE, LAG_HOURS, MIN_TRAINING_ROWS, PATHS
-from src.features import build_feature_matrix, get_feature_columns
-from src.silver_window import filter_to_core_window
+from src.bronze_write import replace_where_predicate
+from src.config import (
+    CATALOG,
+    CURRENT_DATA_VERSION,
+    ENTSO_E_ZONE,
+    LAG_HOURS,
+    MIN_TRAINING_ROWS,
+    PATHS,
+)
+from src.data_quality import apply_dq_mode, check_load_quality
+from src.data_version import DATA_VERSION_PROPERTY
+from src.features import get_feature_columns
+from src.silver_build import build_silver_frame, plan_rebuild_chunks
 
 # Ensure UTC consistency
 spark.conf.set("spark.sql.session.timeZone", "UTC")
@@ -166,7 +185,123 @@ logger.info(f"Processing data window: {window_start} to {window_end}")
 
 # COMMAND ----------
 
-# Cell 5: Load bronze data
+# Cell 5: Silver write helpers, shared by the hourly path and the rebuild
+
+
+def ensure_silver_table(spark) -> None:
+    DeltaTable.createIfNotExists(spark).tableName(PATHS.table_silver).addColumns(
+        SILVER_SCHEMA
+    ).partitionedBy("country").property("delta.autoOptimize.optimizeWrite", "true").property(
+        "delta.autoOptimize.autoCompact", "true"
+    ).property("delta.enableChangeDataFeed", "true").property(
+        "delta.dataSkippingNumIndexedCols", "4"
+    ).execute()
+
+
+def to_silver_spark(spark, frame: pd.DataFrame, run_id: str):
+    frame = frame.copy()
+    frame["run_id"] = run_id
+    frame["country"] = ENTSO_E_ZONE
+    # Reorder columns to match schema exactly (prevents Arrow positional errors)
+    schema_cols = [f.name for f in SILVER_SCHEMA.fields]
+    return spark.createDataFrame(frame[schema_cols], schema=SILVER_SCHEMA)
+
+
+def read_bronze_window(spark, start, end) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """bronze_load and bronze_temperature rows with timestamp in [start, end]."""
+    load_pd = (
+        spark.read.table(PATHS.table_bronze)
+        .filter(F.col("timestamp").between(start, end))
+        .filter(F.col("country") == ENTSO_E_ZONE)
+        .toPandas()
+    )
+    temp_pd = (
+        spark.read.table(PATHS.table_bronze_temp)
+        .filter(F.col("timestamp").between(start, end))
+        .toPandas()
+    )
+    load_pd["timestamp"] = pd.to_datetime(load_pd["timestamp"], utc=True)
+    temp_pd["timestamp"] = pd.to_datetime(temp_pd["timestamp"], utc=True)
+    return load_pd, temp_pd
+
+
+def write_silver_replace(spark, frame: pd.DataFrame, start, end, run_id: str) -> None:
+    """Replaces silver rows in [start, end) with `frame`."""
+    to_silver_spark(spark, frame, run_id).write.format("delta").mode("overwrite").option(
+        "replaceWhere", replace_where_predicate(start, end, ENTSO_E_ZONE)
+    ).saveAsTable(PATHS.table_silver)
+
+
+def set_silver_data_version(spark, version: str) -> None:
+    spark.sql(
+        f"ALTER TABLE {PATHS.table_silver} "
+        f"SET TBLPROPERTIES ('{DATA_VERSION_PROPERTY}' = '{version}')"
+    )
+
+
+def rebuild_silver(spark, start, end, dq_mode: str, dry_run: bool, run_id: str) -> list[dict]:
+    """Rebuilds silver on [start, end) in chunks (spec 014 T4).
+
+    Each chunk is read with a 168h look-back and a 72h look-ahead margin, and
+    only its core range is written. Every chunk is built and checked before the
+    first write, so `enforce` cannot leave a half-rebuilt table.
+    """
+    built = []
+    violations = []
+    for chunk in plan_rebuild_chunks(start, end):
+        load_pd, temp_pd = read_bronze_window(spark, chunk.read_start, chunk.read_end)
+        frame = build_silver_frame(load_pd, temp_pd, chunk.core_start, chunk.core_end)
+        chunk_violations = check_load_quality(frame, chunk.core_start, chunk.core_end)
+        violations += [f"{chunk.core_start:%Y-%m-%d}: {v}" for v in chunk_violations]
+        built.append((chunk, frame))
+        print(
+            f"Chunk {chunk.core_start} -> {chunk.core_end}: {len(frame)} rows, "
+            f"{len(chunk_violations)} DQ violations"
+        )
+
+    apply_dq_mode(violations, dq_mode)
+
+    summary = [
+        {"core_start": c.core_start.isoformat(), "core_end": c.core_end.isoformat(), "rows": len(f)}
+        for c, f in built
+    ]
+    if dry_run:
+        return summary
+
+    ensure_silver_table(spark)
+    for chunk, frame in built:
+        write_silver_replace(spark, frame, chunk.core_start, chunk.core_end, run_id)
+    # Only a completed rebuild from verified bronze bumps the version (ADR-0003).
+    set_silver_data_version(spark, CURRENT_DATA_VERSION)
+    return summary
+
+
+# COMMAND ----------
+
+# Cell 6: Rebuild mode
+# Runs instead of the hourly path when rebuild_start is set.
+
+if rebuild_start_raw:
+    rebuild_start = pd.Timestamp(rebuild_start_raw, tz="UTC")
+    rebuild_end = (
+        pd.Timestamp(rebuild_end_raw, tz="UTC") if rebuild_end_raw else pd.Timestamp(run_date)
+    )
+    chunks = rebuild_silver(spark, rebuild_start, rebuild_end, dq_mode, dry_run, run_id)
+    dbutils.notebook.exit(
+        json.dumps(
+            {
+                "status": "SUCCESS",
+                "mode": "rebuild",
+                "dry_run": dry_run,
+                "data_version": None if dry_run else CURRENT_DATA_VERSION,
+                "chunks": chunks,
+            }
+        )
+    )
+
+# COMMAND ----------
+
+# Cell 7: Load bronze data
 # Reads raw data from Delta tables filtered by the resolved window.
 
 bronze_load_df = (
@@ -192,7 +327,7 @@ if load_count == 0:
 
 # COMMAND ----------
 
-# Cell 6: Validate bronze data quality
+# Cell 8: Validate bronze data quality
 # Performs sanity checks on the input data before feature engineering.
 
 # Check for gaps
@@ -210,7 +345,7 @@ bronze_load_df = bronze_load_df.dropDuplicates(["timestamp"])
 
 # COMMAND ----------
 
-# Cell 7: Convert to pandas and build feature matrix
+# Cell 9: Convert to pandas and build feature matrix
 # Bridges Spark and Pandas to utilize the shared feature engineering library.
 
 if load_count < MIN_TRAINING_ROWS:
@@ -234,31 +369,29 @@ temp_pd = bronze_temp_df.toPandas()
 load_pd["timestamp"] = pd.to_datetime(load_pd["timestamp"], utc=True)
 temp_pd["timestamp"] = pd.to_datetime(temp_pd["timestamp"], utc=True)
 
-# Build features
-feature_pd = build_feature_matrix(load_pd, temp_pd)
-logger.info(f"Feature matrix built (pre-filter): {feature_pd.shape}")
-
-# Discard the leading max_lag-hour margin: those rows lack full backward
-# context for lag/rolling features within THIS run's fetch window. Writing
-# them would silently degrade any previously-good value for the same
-# timestamp once a future run's MERGE (Cell 11, whenMatchedUpdateAll)
+# Build features and keep only the core window. The leading max_lag-hour margin
+# lacks full backward context for lag/rolling features within THIS run's fetch
+# window. Writing it would silently degrade any previously-good value for the
+# same timestamp once a future run's MERGE (Cell 12, whenMatchedUpdateAll)
 # overwrites it — every row is guaranteed to age past this margin exactly
 # once, so an unfiltered write here permanently corrupts it (see spec 009
-# §1.1). window_start and max_lag are already computed in Cell 4.
-feature_pd = filter_to_core_window(feature_pd, window_start, max_lag)
-logger.info(f"Feature matrix after margin filter: {feature_pd.shape}")
+# §1.1). The rebuild uses the same function (spec 014 T4).
+core_start = pd.Timestamp(window_start) + pd.Timedelta(hours=max_lag)
+feature_pd = build_silver_frame(load_pd, temp_pd, core_start)
+logger.info(f"Feature matrix (core window): {feature_pd.shape}")
 
 # COMMAND ----------
 
-# Cell 8: Post-feature validation
+# Cell 10: Post-feature validation
 # Ensures the output of feature engineering meets quality standards.
+# build_silver_frame already fails on missing feature columns.
 
-expected_cols = set(get_feature_columns())
-actual_cols = set(feature_pd.columns)
-missing = expected_cols - actual_cols
-
-if missing:
-    raise ValueError(f"Missing feature columns in output: {missing}")
+# Data-quality checks on the core window (ADR-0004): `enforce` raises here,
+# before the MERGE, so nothing is written.
+dq_violations = check_load_quality(
+    feature_pd, core_start, pd.Timestamp(window_end) + pd.Timedelta(hours=1)
+)
+apply_dq_mode(dq_violations, dq_mode)
 
 # Check for excessive NaNs
 nan_report = feature_pd[get_feature_columns()].isna().mean()
@@ -268,37 +401,16 @@ if not high_nan.empty:
 
 # COMMAND ----------
 
-# Cell 9: Convert back to Spark and cast schema
-# Prepares the data for Delta storage by conforming to the silver schema.
-
-# Add required metadata
-feature_pd["run_id"] = run_id
-feature_pd["country"] = ENTSO_E_ZONE
-
-# Reorder columns to match schema exactly (prevents Arrow positional errors)
-schema_cols = [f.name for f in SILVER_SCHEMA.fields]
-feature_pd = feature_pd[schema_cols]
-
-# Convert to Spark
-silver_spark_df = spark.createDataFrame(feature_pd, schema=SILVER_SCHEMA)
-
-# COMMAND ----------
-
-# Cell 10: Create silver Delta table if not exists
-# Initializes the silver table with partitioning and optimization properties.
+# Cell 11: Create silver Delta table if not exists, convert to Spark
 
 if not dry_run:
-    DeltaTable.createIfNotExists(spark).tableName(PATHS.table_silver).addColumns(
-        SILVER_SCHEMA
-    ).partitionedBy("country").property("delta.autoOptimize.optimizeWrite", "true").property(
-        "delta.autoOptimize.autoCompact", "true"
-    ).property("delta.enableChangeDataFeed", "true").property(
-        "delta.dataSkippingNumIndexedCols", "4"
-    ).execute()
+    ensure_silver_table(spark)
+
+silver_spark_df = to_silver_spark(spark, feature_pd, run_id)
 
 # COMMAND ----------
 
-# Cell 11: MERGE INTO silver
+# Cell 12: MERGE INTO silver
 # Idempotently updates the silver table.
 
 if not dry_run:
@@ -318,39 +430,6 @@ if not dry_run:
 
 # COMMAND ----------
 
-# Cell 12: Handle force_full_rebuild
-# Logic for reprocessing the entire historical dataset in manageable chunks.
-
-if force_full_rebuild and not dry_run:
-    logger.info("Starting FULL REBUILD of silver table...")
-
-    # Get total range
-    range_df = (
-        spark.read.table(PATHS.table_bronze)
-        .select(F.min("timestamp"), F.max("timestamp"))
-        .collect()[0]
-    )
-    full_start = range_df[0]
-    full_end = range_df[1]
-
-    current_start = full_start
-    chunk_days = 30
-
-    while current_start < full_end:
-        current_end = current_start + timedelta(days=chunk_days)
-        # We need overlap for rolling/lags
-        fetch_start = current_start - timedelta(hours=max_lag)
-
-        logger.info(f"Processing rebuild chunk: {current_start} to {current_end}")
-
-        # NOTE: In a real implementation, we would extract Cells 5-11 into a function
-        # or separate task. For this notebook, we assume the user triggers this manually
-        # and we use the existing logic for the chunk.
-
-        current_start = current_end
-
-# COMMAND ----------
-
 # Cell 13: Notebook exit
 # Returns metadata about the transformation run.
 
@@ -364,6 +443,8 @@ exit_info = {
     "window_end": window_end.isoformat(),
     "run_id": run_id,
     "null_rate_summary": feature_pd[get_feature_columns()].isna().mean().to_dict(),
+    "dq_mode": dq_mode,
+    "dq_violations": dq_violations,
 }
 
 dbutils.notebook.exit(json.dumps(exit_info))
