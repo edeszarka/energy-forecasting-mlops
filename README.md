@@ -58,7 +58,7 @@ The pipeline is split into two independent Databricks Workflows: the **Hourly Jo
 ### Source
 - **ENTSO-E Transparency Platform** ([transparency.entsoe.eu](https://transparency.entsoe.eu))
   - Bidding zone: Hungary (10YHU-MAVIR----U)
-  - Metric: Actual Total Load, hourly resolution, MWh
+  - Metric: Actual Total Load, MWh. PT60M responses are used as is; PT15M responses are aggregated to hourly means (an hour with fewer than 4 quarters is left empty). Any other resolution fails the ingestion run (spec 013).
   - Access: public REST API
 - **OpenMeteo** ([open-meteo.com](https://open-meteo.com))
   - Budapest hourly 2m temperature, humidity, cloud cover
@@ -97,17 +97,21 @@ The 14 features used for model input (`src/config.py` `MODEL_INPUT_FEATURES`): t
 
 ## Models
 
-| Model | Horizon | Strategy | Key Features | MLflow Name |
-|---|---|---|---|---|
-| LightGBM | 24h | Direct t+24h target (time-aligned, spec 007) | lag features, temp, calendar | energy_lgbm_24h |
-| LightGBM | 168h | Direct t+168h target (time-aligned, spec 007) | lag features, temp, calendar | energy_lgbm_168h |
-| Prophet | 24h | Built-in decomposition | temperature regressor (+ built-in seasonality) | energy_prophet_24h |
-| Prophet | 168h | Built-in decomposition | temperature regressor (+ built-in seasonality) | energy_prophet_168h |
+| Model | Horizon | Role | Strategy | Key Features | MLflow Name |
+|---|---|---|---|---|---|
+| LightGBM | 24h | Served (promotable) | Direct t+24h target (time-aligned, spec 007) | lag features, temp, calendar | energy_lgbm_24h |
+| Prophet | 24h | Benchmark only | Built-in decomposition | temperature regressor (+ built-in seasonality) | energy_prophet_24h |
+| Seasonal naive | 24h | Serving fallback | `predicted(T) = actual(T − 168h)` | — | `seasonal_naive` (gold only) |
+
+Only the 24h horizon is forecast; the 168h horizon was dropped ([ADR-0001](docs/adr/0001-drop-168h-horizon.md)). Prophet is trained and evaluated for reporting but never promoted or served ([ADR-0002](docs/adr/0002-prophet-benchmark-only-naive-fallback.md)). The model roles live in `src/config.py` (`PROMOTABLE_MODELS`, `BENCHMARK_MODELS`).
 
 LightGBM training uses Optuna hyperparameter optimization with 25 trials by default. Each trial is evaluated with a custom time-ordered 3-fold cross-validation, a 168-hour gap between train and test folds, and a 120-row test window per fold; the search covers eight parameters including the objective (`regression`, `regression_l1`, `huber`). Tuning requires at least 984 training rows (`3 × (120 + 168) + 120`).
 
 ### Champion/Challenger Pattern
-Every retraining run produces a "Challenger" model. The `07_evaluate` notebook loads the run currently tagged `production=true` ("Champion") and scores **both** models on the same rows — the Challenger's logged backtest rows whose targets the Champion never saw during fitting (`served_data_end`) — so a harder post-drift window cannot bias the comparison. A Challenger is promoted only if it achieves >1% relative MAPE improvement; otherwise the Champion stays and nothing changes in production. Runs from before spec 011 have no backtest artifact and fall back to logged metrics (`comparison_method = logged_metrics`). The `08_promote_model` notebook tags the winning run with `production=true` (run-based MLOps pattern, since Free Edition blocks `mlflow.register_model()`).
+Every retraining run produces a "Challenger" model. The `07_evaluate` notebook loads the run currently tagged `production=true` ("Champion") and scores **both** models on the same rows — the Challenger's logged backtest rows whose targets the Champion never saw during fitting (`served_data_end`) — so a harder post-drift window cannot bias the comparison. A Challenger is promoted only if it achieves >1% relative MAPE improvement; otherwise the Champion stays and nothing changes in production. Runs from before spec 011 have no backtest artifact and fall back to logged metrics (`comparison_method = logged_metrics`). The `08_promote_model` notebook tags the winning run with `production=true` (run-based MLOps pattern, since Free Edition blocks `mlflow.register_model()`). Benchmark models still get a `model_evaluation` row, but `challenger_wins` is always false and 08 refuses to tag them, even with `force_promote`.
+
+### Serving and Fallback
+`04_predict` loads only the `energy_lgbm_24h` run tagged `production=true` (and `leak_affected=false`), chosen by the same rule as `07`/`08` (latest `promoted_at`). It never falls back to an unpromoted run. If there is no production run, or loading, feature building or prediction fails, it logs a warning and writes a seasonal-naive forecast instead: `model_name = 'seasonal_naive'`, `model_version = 'seasonal_naive_t-168h'`, for the same target hours as LightGBM (run+25h … run+48h). Targets whose T−168h value is missing in silver are skipped; if none can be produced, the task fails.
 
 ## MLOps Design
 
@@ -141,15 +145,15 @@ energy-forecasting-mlops/
 │   ├── 01_ingest.py                # Volume → Bronze (backlog discovery, MERGE INTO)
 │   ├── 02_transform.py             # Bronze → Silver (feature engineering)
 │   ├── 03_drift_check.py           # Evidently AI drift monitoring
-│   ├── 04_predict.py               # Silver → Gold (batch inference)
-│   ├── 05_train_prophet.py         # Prophet 24h + 168h training
-│   ├── 06_train_lgbm.py            # LightGBM 24h + 168h training
+│   ├── 04_predict.py               # Silver → Gold (production LightGBM or seasonal-naive fallback)
+│   ├── 05_train_prophet.py         # Prophet 24h benchmark training
+│   ├── 06_train_lgbm.py            # LightGBM 24h training
 │   ├── 07_evaluate.py              # Champion/Challenger comparison
 │   └── 08_promote_model.py         # Tag-based promotion + audit log
 ├── src/
 │   ├── __init__.py
 │   ├── api_client.py               # ENTSO-E + OpenMeteo HTTP clients
-│   ├── baseline.py                 # Naive baseline metrics
+│   ├── baseline.py                 # Naive baseline metrics + seasonal-naive fallback
 │   ├── config.py                   # Central constants, paths, thresholds
 │   ├── dashboard.py                # Streamlit dashboard
 │   ├── drift.py                    # Drift extraction, MAE, retrain trigger rules (spec 011)
@@ -164,7 +168,8 @@ energy-forecasting-mlops/
 ├── tests/                          # 103 pytest tests across 12 files
 ├── specs/                          # Design specs 001–008 (+005b)
 ├── dashboard/
-│   └── energy_forecast.sql         # 7 SQL dashboard queries
+│   └── energy_forecast.sql         # 6 SQL dashboard queries
+├── docs/adr/                       # Architecture decision records
 ├── GEMINI.md                       # Developer/agent working notes
 └── README.md
 ```
@@ -184,6 +189,10 @@ Design specs live in `specs/`:
 | 006 | Gold Forecast Timestamp Offset Fix |
 | 007 | LightGBM Target Construction: Positional Shift vs. Time-Based Shift |
 | 008 | Ingestion Volume Backlog Discovery (Replace Fixed-Count File Probing) |
+
+## Decisions
+
+Architecture decision records live in [`docs/adr/`](docs/adr/README.md).
 
 ## Getting Started
 
@@ -215,14 +224,13 @@ databricks bundle deploy --target prod
 
 ## Dashboard
 
-The `dashboard/energy_forecast.sql` file contains 7 queries for a Databricks SQL Dashboard:
+The `dashboard/energy_forecast.sql` file contains 6 queries for a Databricks SQL Dashboard:
 
 | Panel | Purpose |
 |---|---|
 | Pipeline Health Counter | Ingestion freshness monitoring |
-| Actual vs Forecast (24h) | Last 7 days comparison |
-| 7-Day Forecast (168h) | Forward-looking strategic view |
-| Rolling MAPE Table | Weekly accuracy by horizon |
+| Actual vs Forecast (24h) | Last 7 days comparison; seasonal-naive fallback rows shown as their own series |
+| Rolling MAPE Table | Weekly 24h accuracy by model |
 | Drift Monitoring Heatmap | Drifted features over last 30 days |
 | Model Registry Status | Current production models & age |
 | Retraining History Timeline | Promotion audit trail (last 90 days) |
@@ -236,9 +244,9 @@ Metrics are stored in MLflow runs (`mape`, `mae`, `rmse`) and the `model_evaluat
 | Model | Horizon | Test MAPE | Test MAE (MWh) | Test RMSE (MWh) | Test Period |
 |---|---|---|---|---|---|
 | LightGBM | 24h | withdrawn | — | — | — |
-| LightGBM | 168h | withdrawn | — | — | — |
-| Prophet | 24h | 15.70% | 821.23 | 885.96 | 2026-08-19 – 2026-08-23 |
-| Prophet | 168h | 51.75% | 2658.98 | 2666.76 | 2026-08-19 – 2026-08-23 |
+| Prophet (benchmark) | 24h | 15.70% | 821.23 | 885.96 | 2026-08-19 – 2026-08-23 |
+
+The 168h horizon was dropped in spec 013 ([ADR-0001](docs/adr/0001-drop-168h-horizon.md)); its historic MLflow runs and gold rows remain but are no longer read.
 
 > **LightGBM metrics withdrawn.** Before spec 007 (merged 2026-09-27), the LightGBM target was built with an order-dependent positional `shift(-horizon_hours)`, which paired rows with the wrong hour's value (target leakage). LightGBM metrics and MLflow runs from before that date are therefore invalid and not comparable to any other result; re-evaluation is pending the next retraining. Prophet (spec 005b) does not use `shift()` and is unaffected.
 
@@ -268,7 +276,7 @@ TOTAL                       86%  (threshold: 80%)
 3. **Free Tier Quotas**: Databricks Free Edition concurrency limits may cause queuing.
 4. **Drift Counter**: Reliant on successful hourly job execution without gaps. The 2026-09-19→09-23 Databricks outage stalled the counter; spec 008's backlog discovery now drains the accumulated raw-ingestion Volume backlog oldest-first (`max_files_per_run=200`), which self-heals ingestion after a gap.
 5. **Model Registry IAM**: Free Edition blocks `mlflow.register_model()`, so run-based tag pattern used instead.
-6. **Optuna Row Floor**: Tuning requires ≥ 984 training rows (`3 × (120 + 168) + 120`); the 168h training set can currently dip below that and abort the `train_lgbm` task.
+6. **Optuna Row Floor**: Tuning requires ≥ 984 training rows (`3 × (120 + 168) + 120`); a smaller training set aborts the `train_lgbm` task.
 7. **Historical Feature Gaps**: Older `silver_features` rows carry NaN lag/rolling features (roughly 2026-05-01 → 2026-08-25), leaving only ~1k rows usable for training after `dropna`.
 8. **No Staging Gate**: `deploy.yml` deploys prod then dev on the same push to main, with no staging/approval gate.
 9. **Leak-Affected Production Models**: as of 2026-09-28, the currently production-tagged LightGBM models were also trained under the spec-007 leakage and the champion/challenger gate cannot currently promote an honest challenger over their artificially low MAPE. Remediation is tracked separately.
