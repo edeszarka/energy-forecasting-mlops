@@ -78,11 +78,15 @@ MLFLOW_MODEL_NAME_LGBM: Final[str] = "energy_forecast_lgbm"
 MLFLOW_STAGING_ALIAS: Final[str] = "Staging"
 MLFLOW_PROD_ALIAS: Final[str] = "Production"
 
+# MODEL ROLES (ADR-0002): only PROMOTABLE_MODELS can be production-tagged and
+# served; BENCHMARK_MODELS are trained and evaluated for reporting only.
+PROMOTABLE_MODELS: Final[tuple[str, ...]] = ("energy_lgbm_24h",)
+BENCHMARK_MODELS: Final[tuple[str, ...]] = ("energy_prophet_24h",)
+EVALUATED_MODELS: Final[tuple[str, ...]] = PROMOTABLE_MODELS + BENCHMARK_MODELS
+
 # FEATURE ENGINEERING CONSTANTS
 LAG_HOURS: Final[list[int]] = [24, 48, 168]  # t-24h, t-48h, t-168h
 ROLLING_WINDOW_DAYS: Final[int] = 7
-FORECAST_HORIZON_24H: Final[int] = 24
-FORECAST_HORIZON_7D: Final[int] = 168
 
 # Single source of truth for model input columns
 # Used by: 06_train_lgbm.py, 04_predict.py, 03_drift_check.py

@@ -117,7 +117,7 @@ def objective(
         trial: Optuna trial object (used to suggest params and report scores).
         X: Feature matrix.
         y: Target vector.
-        horizon_hours: Forecast horizon (24 or 168), used for gap/seed only.
+        horizon_hours: Forecast horizon in hours, used for gap/seed only.
 
     Returns:
         Mean MAE across CV folds.
@@ -182,7 +182,7 @@ def run_lgbm_tuning(
     Args:
         X: Feature matrix.
         y: Target vector.
-        horizon_hours: Forecast horizon (24 or 168).
+        horizon_hours: Forecast horizon in hours.
         n_trials: Number of Optuna trials. If 0, tuning is skipped.
         timeout_seconds: Optional timeout for the tuning process.
 

@@ -21,9 +21,10 @@ if root_path not in sys.path:
 
 # %% [markdown]
 # # 05_train_prophet
-# **Purpose:** Train two Prophet models (24h and 168h horizons) using Hungarian energy consumption data.
+# **Purpose:** Train the 24h Prophet benchmark on Hungarian energy consumption data.
+#   Benchmark only (ADR-0002): evaluated and reported, never promoted or served.
 # **Inputs:** `workspace.energy_forecasting.silver_features`
-# **Outputs:** Registered MLflow models: `energy_prophet_24h`, `energy_prophet_168h`
+# **Outputs:** MLflow run tagged `model_name=energy_prophet_24h`
 # **Last Updated:** 2024-05-21
 #
 # **Required Libraries:** prophet==1.1.5, pandas, numpy, mlflow
@@ -255,9 +256,7 @@ results = []
 parent_run_name = f"prophet_training_{datetime.now(UTC).strftime('%Y%m%d_%H%M')}"
 
 with mlflow.start_run(run_name=parent_run_name):
-    res_24 = train_prophet_model(pdf, 24, "energy_prophet_24h")
-    res_168 = train_prophet_model(pdf, 168, "energy_prophet_168h")
-    results.extend([res_24, res_168])
+    results.append(train_prophet_model(pdf, 24, "energy_prophet_24h"))
 
 print("\nProphet Training Summary:")
 print(pd.DataFrame(results).to_string(index=False))

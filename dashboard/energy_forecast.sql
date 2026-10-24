@@ -24,62 +24,36 @@ FROM latest_ingest;
 -- ============================================================
 -- QUERY NAME: Actual vs Forecast Line Chart (24h model)
 -- DASHBOARD PANEL: Actual vs Forecast — 24h Model (Last 7 Days)
--- VISUALIZATION: Line chart
+-- VISUALIZATION: Line chart, one series per model_name
 -- REFRESH: Auto (1 hour)
--- PURPOSE: Visual validation of the primary operational model's accuracy.
+-- PURPOSE: Visual validation of the served forecast. Seasonal-naive fallback
+--          rows (ADR-0002) are shown as their own series, not hidden.
 -- ============================================================
 WITH ranked_forecasts AS (
   SELECT 
     f.timestamp,
+    f.model_name,
     f.predicted_mwh,
     f.model_version,
     f.forecast_run_at,
     s.value_mwh AS actual_mwh,
-    ROW_NUMBER() OVER (PARTITION BY f.timestamp ORDER BY f.forecast_run_at DESC) as rnk
+    ROW_NUMBER() OVER (PARTITION BY f.timestamp, f.model_name ORDER BY f.forecast_run_at DESC) as rnk
   FROM workspace.energy_forecasting.gold_forecasts f
   LEFT JOIN workspace.energy_forecasting.silver_features s ON f.timestamp = s.timestamp
   WHERE f.horizon_hours = 24 
-    AND f.model_name LIKE '%lgbm%'
+    AND f.model_name IN ('energy_lgbm_24h', 'seasonal_naive')
     AND f.timestamp >= current_timestamp() - INTERVAL 7 DAYS
 )
 SELECT 
   timestamp,
+  model_name,
   actual_mwh,
   predicted_mwh,
   model_version,
   ABS(actual_mwh - predicted_mwh) AS abs_error_mwh
 FROM ranked_forecasts
 WHERE rnk = 1
-ORDER BY timestamp ASC;
-
-
--- ============================================================
--- QUERY NAME: 7-Day Forecast Forward View
--- DASHBOARD PANEL: 7-Day Forecast (168h Model)
--- VISUALIZATION: Line chart
--- REFRESH: Auto (1 hour)
--- PURPOSE: Future-looking strategic view of Hungarian energy demand.
--- ============================================================
-WITH latest_run AS (
-  SELECT MAX(forecast_run_at) as max_run FROM workspace.energy_forecasting.gold_forecasts WHERE horizon_hours = 168
-),
-forecast_data AS (
-  SELECT 
-    f.timestamp,
-    f.predicted_mwh,
-    CASE WHEN f.timestamp > current_timestamp() THEN true ELSE false END AS is_future
-  FROM workspace.energy_forecasting.gold_forecasts f
-  JOIN latest_run lr ON f.forecast_run_at = lr.max_run
-  WHERE f.horizon_hours = 168
-)
-SELECT 
-  fd.timestamp,
-  fd.predicted_mwh,
-  fd.is_future,
-  s.value_mwh AS actual_mwh
-FROM forecast_data fd
-LEFT JOIN workspace.energy_forecasting.silver_features s ON fd.timestamp = s.timestamp
-ORDER BY fd.timestamp ASC;
+ORDER BY timestamp ASC, model_name ASC;
 
 
 -- ============================================================
@@ -92,21 +66,22 @@ ORDER BY fd.timestamp ASC;
 WITH daily_metrics AS (
   SELECT 
     DATE_TRUNC('week', timestamp) AS week_start,
-    horizon_hours,
+    model_name,
     ABS(actual_mwh - predicted_mwh) / NULLIF(actual_mwh, 0) * 100 AS mape_per_row
   FROM workspace.energy_forecasting.gold_forecasts
   WHERE actual_mwh IS NOT NULL
+    AND horizon_hours = 24
 )
 SELECT 
   week_start,
-  horizon_hours,
+  model_name,
   AVG(mape_per_row) AS weekly_mape,
   COUNT(*) AS n_observations,
   5.0 AS target_mape -- 5% benchmark for European load forecasting
 FROM daily_metrics
 GROUP BY 1, 2
 HAVING n_observations >= 24
-ORDER BY week_start ASC, horizon_hours ASC;
+ORDER BY week_start ASC, model_name ASC;
 
 
 -- ============================================================
