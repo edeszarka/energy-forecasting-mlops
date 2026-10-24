@@ -101,6 +101,14 @@ from pyspark.sql.types import (
 )
 from pyspark.sql.utils import AnalysisException
 
+from src.bronze_write import (
+    LOAD_MERGE_COLUMNS,
+    LOAD_MERGE_CONDITION,
+    TEMPERATURE_MERGE_COLUMNS,
+    TEMPERATURE_MERGE_CONDITION,
+    merge_set,
+    should_skip_ingest,
+)
 from src.config import CATALOG, ENTSO_E_ZONE, PATHS, SCHEMA
 from src.ingest_discovery import select_pending_files
 
@@ -200,13 +208,14 @@ if temp_backlog_remaining > 0:
         f"run's cap of {max_files_per_run}; will be picked up by a subsequent run."
     )
 
-if not found_load_files:
+# Weather-only batches are ingested too (spec 014 T2).
+if should_skip_ingest(found_load_files, found_temp_files):
     dbutils.notebook.exit(
         json.dumps(
             {
                 "status": "skipped",
                 "reason": "no_files_found",
-                "message": f"Load directory {VOLUME_LOAD_PATH} contains no pending .json files.",
+                "message": f"{VOLUME_LOAD_PATH} and {VOLUME_TEMP_PATH} contain no pending .json files.",
             }
         )
     )
@@ -217,9 +226,12 @@ if not found_load_files:
 # Loads the raw data from the Volume, enforcing the defined schema.
 
 try:
-    load_raw_df = (
-        spark.read.option("multiline", "true").schema(BRONZE_SCHEMA).json(found_load_files)
-    )
+    if found_load_files:
+        load_raw_df = (
+            spark.read.option("multiline", "true").schema(BRONZE_SCHEMA).json(found_load_files)
+        )
+    else:
+        load_raw_df = spark.createDataFrame([], BRONZE_SCHEMA)
 
     if found_temp_files:
         temp_raw_df = (
@@ -294,22 +306,21 @@ if not dry_run:
 # Cell 8: MERGE INTO bronze_load
 # Idempotently updates the bronze load table.
 
-if not dry_run:
-    delta_load = DeltaTable.forName(spark, PATHS.table_bronze)
 
+def merge_bronze_load(delta_load, source_df) -> None:
+    """A NULL never overwrites a stored value (protects against partial re-fetches)."""
     delta_load.alias("target").merge(
-        load_processed_df.alias("source"),
+        source_df.alias("source"),
         "target.timestamp = source.timestamp AND target.country = source.country",
     ).whenMatchedUpdate(
-        condition="source.value_mwh IS NOT NULL",
-        set={
-            "value_mwh": "source.value_mwh",
-            "source": "source.source",
-            "fetched_at": "source.fetched_at",
-            "run_id": "source.run_id",
-            "is_gap": "source.is_gap",
-        },
+        condition=LOAD_MERGE_CONDITION,
+        set=merge_set(LOAD_MERGE_COLUMNS),
     ).whenNotMatchedInsertAll().execute()
+
+
+if not dry_run and not load_processed_df.isEmpty():
+    delta_load = DeltaTable.forName(spark, PATHS.table_bronze)
+    merge_bronze_load(delta_load, load_processed_df)
 
     history = delta_load.history(1).collect()[0]
     logger.info(
@@ -321,21 +332,20 @@ if not dry_run:
 # Cell 9: MERGE INTO bronze_temperature
 # Idempotently updates the bronze temperature table.
 
+
+def merge_bronze_temperature(delta_temp, source_df) -> None:
+    """Updates every weather column together (spec 014 T2), unless the source is imputed."""
+    delta_temp.alias("target").merge(
+        source_df.alias("source"), "target.timestamp = source.timestamp"
+    ).whenMatchedUpdate(
+        condition=TEMPERATURE_MERGE_CONDITION,
+        set=merge_set(TEMPERATURE_MERGE_COLUMNS),
+    ).whenNotMatchedInsertAll().execute()
+
+
 if not dry_run and not temp_processed_df.isEmpty():
     delta_temp = DeltaTable.forName(spark, PATHS.table_bronze_temp)
-
-    delta_temp.alias("target").merge(
-        temp_processed_df.alias("source"), "target.timestamp = source.timestamp"
-    ).whenMatchedUpdate(
-        condition="source.is_weather_imputed = false",
-        set={
-            "temperature_c": "source.temperature_c",
-            "is_weather_imputed": "source.is_weather_imputed",
-            "source": "source.source",
-            "fetched_at": "source.fetched_at",
-            "run_id": "source.run_id",
-        },
-    ).whenNotMatchedInsertAll().execute()
+    merge_bronze_temperature(delta_temp, temp_processed_df)
 
 # COMMAND ----------
 
