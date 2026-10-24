@@ -55,7 +55,7 @@ from pyspark.sql.types import (
 )
 from pyspark.sql.window import Window
 
-from src.config import CATALOG, PATHS, RETRAIN_FLAG_PATH
+from src.config import CATALOG, CURRENT_DATA_VERSION, PATHS, RETRAIN_FLAG_PATH
 from src.promotion import BENCHMARK_ONLY_REASON, is_promotable, pick_production_run
 
 # COMMAND ----------
@@ -131,7 +131,8 @@ def get_production_runs(model_name: str, mlflow_client: MlflowClient) -> list:
         experiment_ids=[r.experiment_id for r in mlflow_client.search_experiments()],
         filter_string=(
             f"tags.model_name = '{model_name}' AND tags.production = 'true' "
-            "AND tags.leak_affected = 'false'"
+            "AND tags.leak_affected = 'false' "
+            f"AND tags.data_version = '{CURRENT_DATA_VERSION}'"
         ),
         max_results=50,
     )

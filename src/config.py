@@ -27,6 +27,11 @@ OPENMETEO_LON: Final[float] = 19.0402
 # tz_localize cannot map back to UTC (spec 012). start_date/end_date are also
 # interpreted in this timezone, so UTC keeps them aligned with UTC fetch windows.
 OPENMETEO_TIMEZONE: Final[str] = "UTC"
+# Same models and parameters as /v1/forecast, first hours of each run stitched;
+# used only by the backfill path (spec 014 T3, ADR-0005).
+OPENMETEO_HISTORICAL_FORECAST_URL: Final[str] = (
+    "https://historical-forecast-api.open-meteo.com/v1/forecast"
+)
 
 HTTP_TIMEOUT_SECONDS: Final[int] = 30
 HTTP_MAX_RETRIES: Final[int] = 3
@@ -62,6 +67,10 @@ class DataPaths:
     volume_raw_temp: str = f"{VOLUME_PATH}/raw_ingestion/temperature"
     volume_archive_load: str = f"{VOLUME_PATH}/raw_ingestion/archive/load"
     volume_archive_temp: str = f"{VOLUME_PATH}/raw_ingestion/archive/temperature"
+    # Backfill path (spec 014 T3): one file per chunk, archived per run
+    volume_backfill_load: str = f"{VOLUME_PATH}/raw_backfill/load"
+    volume_backfill_temp: str = f"{VOLUME_PATH}/raw_backfill/temperature"
+    volume_backfill_archive: str = f"{VOLUME_PATH}/raw_backfill/archive"
     volume_reports: str = f"{VOLUME_PATH}/reports"
     volume_flags: str = f"{VOLUME_PATH}/flags"
 
@@ -83,6 +92,11 @@ MLFLOW_PROD_ALIAS: Final[str] = "Production"
 PROMOTABLE_MODELS: Final[tuple[str, ...]] = ("energy_lgbm_24h",)
 BENCHMARK_MODELS: Final[tuple[str, ...]] = ("energy_prophet_24h",)
 EVALUATED_MODELS: Final[tuple[str, ...]] = PROMOTABLE_MODELS + BENCHMARK_MODELS
+
+# DATA VERSIONING (ADR-0003): runs tag the silver `pipeline.data_version` they
+# read; serving, evaluation, promotion and the drift reference only consider
+# runs tagged with CURRENT_DATA_VERSION.
+CURRENT_DATA_VERSION: Final[str] = "2"
 
 # FEATURE ENGINEERING CONSTANTS
 LAG_HOURS: Final[list[int]] = [24, 48, 168]  # t-24h, t-48h, t-168h
@@ -113,6 +127,18 @@ DRIFT_SCORE_THRESHOLD: Final[float] = 0.15  # Jensen-Shannon divergence
 DRIFT_CONSECUTIVE_HOURS: Final[int] = 3  # Trigger retraining
 DRIFT_REFERENCE_WINDOW_DAYS: Final[int] = 30
 RETRAINING_FLAG_TABLE: Final[str] = f"{CATALOG}.{SCHEMA}.retraining_flags"
+
+# DATA-QUALITY THRESHOLDS (ADR-0004, spec 014 T5)
+# PROVISIONAL: set from the T0 raw ENTSO-E responses (reports/partB1_spec014_2026-10-24.md),
+# to be calibrated on the rebuilt 2024-2025 silver (runbook step 6) in the
+# follow-up PR that switches dq_mode to enforce.
+# Observed hourly means 3,488-7,073 MW (Jan 2024 weekday peak to Oct 2026 night).
+LOAD_MIN_MW: Final[float] = 2500.0  # PROVISIONAL
+LOAD_MAX_MW: Final[float] = 9000.0  # PROVISIONAL
+# Observed lag-24h correlation 0.70-0.89 on healthy samples; the same samples
+# stretched 4x (pre-013 parser) give -0.36 to -0.14, the owner's corrupted
+# months 0.02-0.22.
+DQ_MIN_CORR_24H: Final[float] = 0.5  # PROVISIONAL
 
 # HUNGARIAN PUBLIC HOLIDAYS (Fixed dates)
 FIXED_HOLIDAYS: Final[dict[int, list[int]]] = {

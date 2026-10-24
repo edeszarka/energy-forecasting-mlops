@@ -47,6 +47,39 @@ This project implements a **Split Ingestion Architecture** to overcome the outbo
 
 The pipeline is split into two independent Databricks Workflows: the **Hourly Job** (ingest → transform → drift check → predict) and the **Retraining Job** (train → evaluate → promote).
 
+### Backfill Path
+Historical data takes its own path ([ADR-0005](docs/adr/0005-separate-backfill-path.md)), so re-ingesting years of data neither floods the hourly Volume nor blocks hourly ingestion:
+
+```
+[ backfill.yml ] (manual; inputs start_date, end_date — end exclusive; own concurrency group)
+       │  ENTSO-E in 7-day chunks, Open-Meteo Historical Forecast API in monthly chunks
+       ▼
+[ UC Volume: /raw_backfill/{load,temperature}/ ]  one JSON file per chunk
+       │
+       ▼
+[ 00_backfill_bronze ] (manual; mode = dry_run | execute)
+       │  monthly row counts before/after, data-quality checks always enforced,
+       │  replaceWhere on [start, end) — NULLs replace stored values on this path
+       ▼
+[ bronze_load, bronze_temperature ]
+       │
+       ▼
+[ 02_transform, rebuild mode ] (rebuild_start, rebuild_end) → silver in 30-day chunks
+```
+
+The hourly path keeps its incremental `MERGE`, where a NULL never overwrites a stored load value. Fetching logic lives in `src/backfill.py` (`python -m src.backfill --start … --end … --out …`); the workflow only runs it and uploads the files.
+
+### Data Versioning
+Every model is tied to the data it was trained on ([ADR-0003](docs/adr/0003-data-versioning-of-models.md)). The silver table carries the Delta table property `pipeline.data_version`; only a full rebuild from verified bronze bumps it (version `2` since spec 014; a table without the property is version `1`). `05`/`06` tag each run with the version they read (`data_version`), and serving (`04`), evaluation (`07`), promotion (`08`) and the drift reference window (`03`) only consider runs whose tag equals `CURRENT_DATA_VERSION` in `src/config.py`. Older runs are marked once by `scripts/remediate_014_data_version.py` (`data_version=1`, `invalidated_reason`, `production=false`; dry run by default).
+
+### Data-Quality Checks
+Load data must pass `src/data_quality.py` before it is written ([ADR-0004](docs/adr/0004-data-quality-checks-fail-the-pipeline.md)):
+- 24 distinct hourly rows per complete UTC day, no duplicate or off-hour timestamps;
+- non-null values within `[LOAD_MIN_MW, LOAD_MAX_MW]`;
+- a daily cycle: the correlation with the value 24h earlier is at least `DQ_MIN_CORR_24H` and higher than the correlation with the value 12h earlier, on hour-aligned pairs only.
+
+`00_backfill_bronze` always enforces the checks, per calendar month. `02_transform` runs them on the silver frame before writing, controlled by `dq_mode`: `warn` logs violations, `enforce` fails the task and writes nothing. The thresholds in `src/config.py` are provisional until they are calibrated on the rebuilt silver; `databricks.yml` sets `dq_mode: warn` until then.
+
 ### Reliability Design
 - **Separation of Concerns**: GitHub Actions handles all external connectivity, while Databricks remains an air-gapped environment focused on scalable processing and modeling.
 - **Persistence Layer**: Unity Catalog Volumes act as the landing zone for raw data, ensuring a clear audit trail and enabling easy backfills.
@@ -58,7 +91,7 @@ The pipeline is split into two independent Databricks Workflows: the **Hourly Jo
 ### Source
 - **ENTSO-E Transparency Platform** ([transparency.entsoe.eu](https://transparency.entsoe.eu))
   - Bidding zone: Hungary (10YHU-MAVIR----U)
-  - Metric: Actual Total Load, MWh. PT60M responses are used as is; PT15M responses are aggregated to hourly means (an hour with fewer than 4 quarters is left empty). Any other resolution fails the ingestion run (spec 013).
+  - Metric: Actual Total Load, MWh. PT60M responses are used as is; PT15M responses are aggregated to hourly means (an hour with fewer than 4 quarters is left empty). Every `Period` of every `TimeSeries` is read; curve type `A03` (an omitted position repeats the previous value) is expanded before aggregation. Any other resolution, a curve type other than `A01`/`A03` (or none), or a unit other than `MAW` fails the ingestion run (specs 013, 014).
   - Access: public REST API
 - **OpenMeteo** ([open-meteo.com](https://open-meteo.com))
   - Budapest hourly 2m temperature, humidity, cloud cover
@@ -108,10 +141,10 @@ Only the 24h horizon is forecast; the 168h horizon was dropped ([ADR-0001](docs/
 LightGBM training uses Optuna hyperparameter optimization with 25 trials by default. Each trial is evaluated with a custom time-ordered 3-fold cross-validation, a 168-hour gap between train and test folds, and a 120-row test window per fold; the search covers eight parameters including the objective (`regression`, `regression_l1`, `huber`). Tuning requires at least 984 training rows (`3 × (120 + 168) + 120`).
 
 ### Champion/Challenger Pattern
-Every retraining run produces a "Challenger" model. The `07_evaluate` notebook loads the run currently tagged `production=true` ("Champion") and scores **both** models on the same rows — the Challenger's logged backtest rows whose targets the Champion never saw during fitting (`served_data_end`) — so a harder post-drift window cannot bias the comparison. A Challenger is promoted only if it achieves >1% relative MAPE improvement; otherwise the Champion stays and nothing changes in production. Runs from before spec 011 have no backtest artifact and fall back to logged metrics (`comparison_method = logged_metrics`). The `08_promote_model` notebook tags the winning run with `production=true` (run-based MLOps pattern, since Free Edition blocks `mlflow.register_model()`). Benchmark models still get a `model_evaluation` row, but `challenger_wins` is always false and 08 refuses to tag them, even with `force_promote`.
+Every retraining run produces a "Challenger" model. The `07_evaluate` notebook loads the run currently tagged `production=true` ("Champion") and scores **both** models on the same rows — the Challenger's logged backtest rows whose targets the Champion never saw during fitting (`served_data_end`) — so a harder post-drift window cannot bias the comparison. A Challenger is promoted only if it achieves >1% relative MAPE improvement; otherwise the Champion stays and nothing changes in production. Runs from before spec 011 have no backtest artifact and fall back to logged metrics (`comparison_method = logged_metrics`). The `08_promote_model` notebook tags the winning run with `production=true` (run-based MLOps pattern, since Free Edition blocks `mlflow.register_model()`). Benchmark models still get a `model_evaluation` row, but `challenger_wins` is always false and 08 refuses to tag them, even with `force_promote`. When no production run of the current data version exists (`first_run`), a Challenger is promoted only if its MAPE is below the naive baseline's MAPE on the same test rows; otherwise serving stays on seasonal naive (spec 014).
 
 ### Serving and Fallback
-`04_predict` loads only the `energy_lgbm_24h` run tagged `production=true` (and `leak_affected=false`), chosen by the same rule as `07`/`08` (latest `promoted_at`). It never falls back to an unpromoted run. If there is no production run, or loading, feature building or prediction fails, it logs a warning and writes a seasonal-naive forecast instead: `model_name = 'seasonal_naive'`, `model_version = 'seasonal_naive_t-168h'`, for the same target hours as LightGBM (run+25h … run+48h). Targets whose T−168h value is missing in silver are skipped; if none can be produced, the task fails.
+`04_predict` loads only the `energy_lgbm_24h` run tagged `production=true` (and `leak_affected=false`, `data_version` = `CURRENT_DATA_VERSION`), chosen by the same rule as `07`/`08` (latest `promoted_at`). It never falls back to an unpromoted run. If there is no production run, or loading, feature building or prediction fails, it logs a warning and writes a seasonal-naive forecast instead: `model_name = 'seasonal_naive'`, `model_version = 'seasonal_naive_t-168h'`, for the same target hours as LightGBM (run+25h … run+48h). Targets whose T−168h value is missing in silver are skipped; if none can be produced, the task fails.
 
 ## MLOps Design
 
@@ -125,6 +158,7 @@ Drift monitoring uses Evidently AI's `DataDriftPreset` in `03_drift_check`. It d
 | **ci.yml** | PR to main; push to `feature/*` or `prediction_dashboard` | `ruff check` → `mypy src/` → `pytest --cov-fail-under=80` |
 | **deploy.yml** | Push to main | Validate Bundle (`--target prod`), then deploy prod, then deploy dev — no staging gate (both targets on the same push) |
 | **ingestion_hourly.yml** | Cron `5 * * * *`, manual | Fetch ENTSO-E + OpenMeteo (`lookback_hours`, default 24) → segment → upload to UC Volumes → trigger Databricks job |
+| **backfill.yml** | Manual (`start_date`, `end_date`) | Fetch history in chunks → upload to `/raw_backfill/` (no job trigger; load with `00_backfill_bronze`) |
 
 ## Repository Structure
 
@@ -132,6 +166,7 @@ Drift monitoring uses Evidently AI's `DataDriftPreset` in `03_drift_check`. It d
 energy-forecasting-mlops/
 ├── .github/
 │   └── workflows/
+│       ├── backfill.yml            # Manual historical fetch in chunks (ADR-0005)
 │       ├── ci.yml                  # lint + type-check + unit tests
 │       ├── deploy.yml              # DAB deploy to prod + dev
 │       └── ingestion_hourly.yml    # API acquisition (Internet Bridge)
@@ -142,8 +177,9 @@ energy-forecasting-mlops/
 ├── pyproject.toml                  # Project metadata, dependencies, tool config
 ├── requirements.txt                # Pinned deps for Databricks %pip install
 ├── notebooks/
+│   ├── 00_backfill_bronze.py       # Manual: backfill files → Bronze (replaceWhere, DQ enforced)
 │   ├── 01_ingest.py                # Volume → Bronze (backlog discovery, MERGE INTO)
-│   ├── 02_transform.py             # Bronze → Silver (feature engineering)
+│   ├── 02_transform.py             # Bronze → Silver (feature engineering, rebuild mode, dq_mode)
 │   ├── 03_drift_check.py           # Evidently AI drift monitoring
 │   ├── 04_predict.py               # Silver → Gold (production LightGBM or seasonal-naive fallback)
 │   ├── 05_train_prophet.py         # Prophet 24h benchmark training
@@ -153,19 +189,26 @@ energy-forecasting-mlops/
 ├── src/
 │   ├── __init__.py
 │   ├── api_client.py               # ENTSO-E + OpenMeteo HTTP clients
+│   ├── backfill.py                 # Chunked historical fetch for backfill.yml (spec 014)
 │   ├── baseline.py                 # Naive baseline metrics + seasonal-naive fallback
+│   ├── bronze_write.py             # Bronze MERGE columns + backfill preparation (spec 014)
 │   ├── config.py                   # Central constants, paths, thresholds
 │   ├── dashboard.py                # Streamlit dashboard
+│   ├── data_quality.py             # Load data-quality checks, dq_mode (spec 014)
+│   ├── data_version.py             # Silver data version + run remediation plan (spec 014)
 │   ├── drift.py                    # Drift extraction, MAE, retrain trigger rules (spec 011)
 │   ├── features.py                 # Feature engineering (18 columns)
 │   ├── forecast_timing.py          # Inference anchor → target timestamp (spec 006)
 │   ├── ingest_discovery.py         # Volume backlog selection (spec 008)
 │   ├── promotion.py                # Champion/challenger comparison (spec 011)
 │   ├── retrain_trigger.py          # Starts the retraining job on drift (spec 011)
+│   ├── silver_build.py             # Silver build shared by hourly path and rebuild (spec 014)
 │   ├── splits.py                   # Train/val/test + rolling-origin splits
 │   ├── target_construction.py      # Time-aligned horizon target (spec 007)
 │   └── tuning.py                   # Optuna search space + CV
-├── tests/                          # 103 pytest tests across 12 files
+├── scripts/
+│   └── remediate_014_data_version.py  # One-time MLflow tag remediation (dry run default)
+├── tests/                          # pytest suite
 ├── specs/                          # Design specs 001–008 (+005b)
 ├── dashboard/
 │   └── energy_forecast.sql         # 6 SQL dashboard queries
@@ -241,16 +284,18 @@ An interactive Streamlit dashboard is also available at `src/dashboard.py` (inst
 
 Metrics are stored in MLflow runs (`mape`, `mae`, `rmse`) and the `model_evaluation` Delta table.
 
-| Model | Horizon | Test MAPE | Test MAE (MWh) | Test RMSE (MWh) | Test Period |
-|---|---|---|---|---|---|
-| LightGBM | 24h | withdrawn | — | — | — |
-| Prophet (benchmark) | 24h | 15.70% | 821.23 | 885.96 | 2026-08-19 – 2026-08-23 |
+**No results are published at the moment.** Every model and metric produced before the spec 014 cut-over was trained and evaluated on corrupted load data (see [Data Incident, October 2026](#data-incident-october-2026)). Results will be reported once a model trained on data version 2 has been evaluated against the seasonal-naive baseline.
 
 The 168h horizon was dropped in spec 013 ([ADR-0001](docs/adr/0001-drop-168h-horizon.md)); its historic MLflow runs and gold rows remain but are no longer read.
 
-> **LightGBM metrics withdrawn.** Before spec 007 (merged 2026-09-27), the LightGBM target was built with an order-dependent positional `shift(-horizon_hours)`, which paired rows with the wrong hour's value (target leakage). LightGBM metrics and MLflow runs from before that date are therefore invalid and not comparable to any other result; re-evaluation is pending the next retraining. Prophet (spec 005b) does not use `shift()` and is unaffected.
+> **Earlier withdrawal.** Before spec 007 (merged 2026-09-27), the LightGBM target was built with an order-dependent positional `shift(-horizon_hours)`, which paired rows with the wrong hour's value (target leakage). Those runs were already invalid before the data incident.
 
-Prophet metrics are from a 5-fold rolling-origin backtest (spec 005b) and are not directly comparable to other evaluation methodologies.
+## Data Incident, October 2026
+
+- **What happened.** ENTSO-E returns MAVIR actual load at 15-minute resolution (PT15M) — at least since 2026-08-03, and the 2024 history is served that way too. The parser assumed hourly data and mapped each 15-minute position to an hour, which stretched the daily load curve by a factor of four. It only logged a warning (`Unexpected resolution: PT15M`), which nobody read.
+- **Impact.** Bronze and silver load history, every model trained on it, every reported metric, the drift reference windows and the gold actuals before the cut-over are invalid.
+- **Detection.** The warning in every retained GitHub Actions ingestion log, and a correlation check on silver: in May, June and September 2026 the lag-24h correlation collapsed (0.02–0.22) below the lag-12h correlation (0.32–0.68), which a real daily cycle never shows; the other months were degraded.
+- **Fix.** Spec 013 parses PT15M into hourly means and fails on any other resolution. Spec 014 reads every period, handles the `A03` curve type, fails on unexpected document content, re-ingests history from 2024-01-01 through the backfill path, rebuilds silver with hour-aligned features, makes data-quality checks fail the pipeline, invalidates all older models through data versioning, and requires the first clean model to beat seasonal naive before it can be served.
 
 ## Test Coverage
 
@@ -279,7 +324,7 @@ TOTAL                       86%  (threshold: 80%)
 6. **Optuna Row Floor**: Tuning requires ≥ 984 training rows (`3 × (120 + 168) + 120`); a smaller training set aborts the `train_lgbm` task.
 7. **Historical Feature Gaps**: Older `silver_features` rows carry NaN lag/rolling features (roughly 2026-05-01 → 2026-08-25), leaving only ~1k rows usable for training after `dropna`.
 8. **No Staging Gate**: `deploy.yml` deploys prod then dev on the same push to main, with no staging/approval gate.
-9. **Leak-Affected Production Models**: as of 2026-09-28, the currently production-tagged LightGBM models were also trained under the spec-007 leakage and the champion/challenger gate cannot currently promote an honest challenger over their artificially low MAPE. Remediation is tracked separately.
+9. **No Served Model Until a Clean Retrain**: after the spec 014 remediation no run of the current data version exists, so serving uses seasonal naive until a version-2 LightGBM run beats the naive baseline.
 
 ## Planned Enhancements
 - Cyclical encoding (sine/cosine for hour_of_day, day_of_week)

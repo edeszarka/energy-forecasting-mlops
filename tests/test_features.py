@@ -135,6 +135,47 @@ def test_rolling_features_min_periods(make_hourly_df):
     assert not np.isnan(feat_df.iloc[71]["rolling_7d_mean"])
 
 
+def test_rolling_features_are_hour_aligned_across_a_gap(make_hourly_df):
+    """AC4 (spec 014 T4): a gap of N hours does not shift the rolling windows."""
+    df = make_hourly_df(n_hours=300)
+    gap = range(200, 210)  # 10 missing hours
+    gapped = df.drop(index=gap)
+
+    feat = add_rolling_features(gapped).set_index("timestamp")
+
+    values = df.set_index("timestamp")["value_mwh"].drop(df["timestamp"].iloc[list(gap)])
+    for t in df["timestamp"].iloc[[215, 230, 299]]:
+        last_24h = values[(values.index > t - pd.Timedelta(hours=24)) & (values.index <= t)]
+        last_7d = values[(values.index > t - pd.Timedelta(hours=168)) & (values.index <= t)]
+        assert feat.loc[t, "rolling_24h_mean"] == pytest.approx(last_24h.mean())
+        assert feat.loc[t, "rolling_7d_mean"] == pytest.approx(last_7d.mean())
+        assert feat.loc[t, "rolling_7d_std"] == pytest.approx(last_7d.std())
+
+
+def test_rolling_min_periods_count_hours_with_values(make_hourly_df):
+    df = make_hourly_df(n_hours=40)
+    # 12 hours, then a 20-hour gap: at the next row only 11 of the last 24 hours
+    # have a value, so min_periods=12 is not met (row-based rolling would see 12).
+    gapped = df.drop(index=range(12, 32))
+
+    feat = add_rolling_features(gapped).set_index("timestamp")
+
+    assert pd.isna(feat.loc[df["timestamp"].iloc[32], "rolling_24h_mean"])
+
+
+def test_temperature_lag_is_hour_aligned_across_a_load_gap(make_hourly_df, make_weather_df):
+    """AC4: missing load hours do not shift temperature_lag_24h."""
+    load = make_hourly_df(n_hours=100).drop(index=range(50, 55))
+    weather = make_weather_df(n_hours=100)
+    weather["temperature_c"] = np.arange(100, dtype=float)  # temperature == hour index
+
+    feat = add_weather_features(load, weather).set_index("timestamp")
+
+    for i in (60, 74, 99):
+        t = weather["timestamp"].iloc[i]
+        assert feat.loc[t, "temperature_lag_24h"] == i - 24
+
+
 def test_weather_merge_empty_df(make_hourly_df):
     df = make_hourly_df(n_hours=10)
     weather_df = pd.DataFrame(

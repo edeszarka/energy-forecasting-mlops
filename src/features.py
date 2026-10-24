@@ -160,12 +160,26 @@ def add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.sort_values("timestamp").copy()
 
-    # 7-day (168h) rolling statistics
-    df["rolling_7d_mean"] = df["value_mwh"].rolling(window=168, min_periods=72).mean()
-    df["rolling_7d_std"] = df["value_mwh"].rolling(window=168, min_periods=72).std()
+    # Windows are computed on the full hourly grid (spec 014 T4): over rows, a
+    # gap would pull hours older than the window into it. On the grid a window
+    # of N rows is exactly N hours, and min_periods counts hours with a value.
+    values = df.set_index("timestamp")["value_mwh"]
+    grid = values.reindex(pd.date_range(values.index.min(), values.index.max(), freq="h"))
 
+    # 7-day (168h) rolling statistics
+    rolling_7d = grid.rolling(window=168, min_periods=72)
     # 24-hour rolling mean
-    df["rolling_24h_mean"] = df["value_mwh"].rolling(window=24, min_periods=12).mean()
+    rolling_24h = grid.rolling(window=24, min_periods=12)
+
+    stats = pd.DataFrame(
+        {
+            "rolling_7d_mean": rolling_7d.mean(),
+            "rolling_7d_std": rolling_7d.std(),
+            "rolling_24h_mean": rolling_24h.mean(),
+        }
+    ).reindex(df["timestamp"])
+    for col in stats.columns:
+        df[col] = stats[col].to_numpy()
 
     return df
 
@@ -230,21 +244,26 @@ def add_weather_features(
     ]
     available = [c for c in weather_cols if c in weather_df.columns]
 
-    df = pd.merge(df, weather_df[available], on="timestamp", how="left")
+    # Weather is filled and lagged on the full hourly grid (spec 014 T4), so a
+    # missing load hour can't shift temperature_lag_24h or the fill windows.
+    grid = pd.DataFrame(
+        {"timestamp": pd.date_range(df["timestamp"].min(), df["timestamp"].max(), freq="h")}
+    )
+    weather = pd.merge(grid, weather_df[available], on="timestamp", how="left")
 
     # Create any missing weather columns as NaN
     for col in weather_cols:
-        if col not in df.columns:
-            df[col] = np.nan if col != "is_weather_imputed" else False
+        if col not in weather.columns:
+            weather[col] = np.nan if col != "is_weather_imputed" else False
 
     # Impute missing values
-    df = _fill_missing_weather(df)
+    weather = _fill_missing_weather(weather)
 
     # Add temperature lag
-    df = df.sort_values("timestamp")
-    df["temperature_lag_24h"] = df["temperature_c"].shift(24)
+    weather["temperature_lag_24h"] = weather["temperature_c"].shift(24)
 
-    return df
+    df = df.drop(columns=[c for c in weather.columns if c != "timestamp"], errors="ignore")
+    return pd.merge(df.sort_values("timestamp"), weather, on="timestamp", how="left")
 
 
 def build_feature_matrix(

@@ -51,6 +51,7 @@ from src.config import (
     OPTUNA_N_TRIALS,
     PATHS,
 )
+from src.data_version import read_data_version, table_properties
 from src.promotion import BACKTEST_ARTIFACT
 from src.splits import make_holdout_splits
 from src.target_construction import build_horizon_target
@@ -156,6 +157,7 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
         training_data_start = train_df["timestamp"].min()
         mlflow.set_tag("model_name", model_name)  # Added for discovery
         mlflow.set_tag("leak_affected", "false")
+        mlflow.set_tag("data_version", CONFIG["data_version"])
         mlflow.set_tag("training_data_end", training_data_end.isoformat())
         mlflow.set_tag("training_data_start", training_data_start.isoformat())
         # Early stopping looks at the validation window, so the served model has
@@ -213,6 +215,12 @@ def train_lgbm_model(df: pd.DataFrame, horizon_hours: int, model_name: str):
 
 # Main execution
 spark.sql(f"USE CATALOG {CATALOG}")
+# Read the version before the data: a rebuild finishing in between leaves the
+# run tagged with the older version, which is never served (ADR-0003).
+CONFIG["data_version"] = read_data_version(
+    table_properties(spark.sql(f"SHOW TBLPROPERTIES {CONFIG['silver_table']}").collect())
+)
+logger.info(f"Silver data_version: {CONFIG['data_version']}")
 pdf = spark.read.table(CONFIG["silver_table"]).toPandas()
 pdf["timestamp"] = pd.to_datetime(pdf["timestamp"])
 

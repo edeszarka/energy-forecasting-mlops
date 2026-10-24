@@ -1,0 +1,92 @@
+name: "Backfill"
+
+# Historical re-ingest (spec 014 T3, ADR-0005). Fetches in large chunks and
+# uploads to raw_backfill/; does not trigger any Databricks job. Load the files
+# with notebooks/00_backfill_bronze.py (dry_run first).
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "First UTC day to fetch (YYYY-MM-DD), e.g. 2024-01-01"
+        required: true
+      end_date:
+        description: "Exclusive end UTC day (YYYY-MM-DD), e.g. yesterday"
+        required: true
+
+# Own group: never blocks or queues behind hourly ingestion.
+concurrency:
+  group: backfill
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  VOLUME_BACKFILL: "dbfs:/Volumes/workspace/energy_forecasting/data/raw_backfill"
+
+jobs:
+  fetch_and_upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: "pyproject.toml"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Fetch chunks
+        env:
+          ENTSO_E_API_KEY: ${{ secrets.ENTSO_E_API_KEY }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+        run: python -m src.backfill --start "$START_DATE" --end "$END_DATE" --out /tmp/backfill
+
+      - name: Remove legacy Databricks CLI
+        run: |
+          python -m pip uninstall -y databricks-cli || true
+          sudo rm -f /usr/local/bin/databricks /usr/bin/databricks || true
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Upload chunk files to the Volume
+        run: |
+          for kind in load temperature; do
+            databricks fs mkdirs "$VOLUME_BACKFILL/$kind"
+            count=0
+            for f in /tmp/backfill/"$kind"/*.json; do
+              [ -e "$f" ] || continue
+              databricks fs cp "$f" "$VOLUME_BACKFILL/$kind/$(basename "$f")" --overwrite
+              count=$((count + 1))
+            done
+            echo "Uploaded $count $kind files."
+            echo "${kind^^}_FILES=$count" >> "$GITHUB_ENV"
+          done
+
+      - name: Write job summary
+        env:
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+        run: |
+          {
+            echo "## Backfill"
+            echo "Range: \`$START_DATE\` → \`$END_DATE\` (exclusive)."
+            echo "Uploaded ${LOAD_FILES:-0} load and ${TEMPERATURE_FILES:-0} temperature files."
+            echo "Next: run \`00_backfill_bronze\` with mode=dry_run for the same range."
+          } >> "$GITHUB_STEP_SUMMARY"

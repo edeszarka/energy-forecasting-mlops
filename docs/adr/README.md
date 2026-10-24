@@ -8,3 +8,6 @@ Format: `NNNN-short-title.md`. Statuses: Proposed, Accepted, Superseded by ADR-N
 |---|---|---|---|
 | [0001](0001-drop-168h-horizon.md) | Drop the 168h forecast horizon | Accepted | 013 |
 | [0002](0002-prophet-benchmark-only-naive-fallback.md) | Prophet benchmark-only; seasonal-naive serving fallback | Accepted | 013 |
+| [0003](0003-data-versioning-of-models.md) | Version the training data; serve only current-version models | Proposed | 014 |
+| [0004](0004-data-quality-checks-fail-the-pipeline.md) | Data-quality checks fail the pipeline instead of warning | Proposed | 013, 014 |
+| [0005](0005-separate-backfill-path.md) | A separate backfill path for historical data | Proposed | 014 |
