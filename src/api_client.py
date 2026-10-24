@@ -91,6 +91,63 @@ def _quarter_hours_to_hourly(
     return rows
 
 
+_RESOLUTION_MINUTES: dict[str, int] = {"PT60M": 60, "PT15M": 15}
+
+
+def _expand_curve(points: dict[int, float], n_positions: int) -> dict[int, float]:
+    """Expands an A03 curve: a missing position repeats the previous value.
+
+    ENTSO-E omits a position whose value equals the one before it, up to the end
+    of the period. Positions before the first published one stay missing.
+    """
+    expanded: dict[int, float] = {}
+    last: float | None = None
+    for pos in range(1, n_positions + 1):
+        if pos in points:
+            last = points[pos]
+        if last is not None:
+            expanded[pos] = last
+    return expanded
+
+
+def _parse_period(period: ET.Element, namespace: str, curve_type: str) -> list[dict[str, Any]]:
+    """Parses one ENTSO-E Period into hourly rows (timestamp, value_mwh)."""
+    start_str = period.find(f"{namespace}timeInterval/{namespace}start").text  # type: ignore
+    period_start = pd.to_datetime(start_str).tz_convert("UTC")
+
+    # Positions are only meaningful with a known resolution; mapping any
+    # other resolution to hours would silently shift timestamps (spec 013).
+    resolution = period.find(f"{namespace}resolution").text  # type: ignore
+    if resolution not in _RESOLUTION_MINUTES:
+        raise ValueError(
+            f"Unsupported ENTSO-E resolution {resolution} for period starting "
+            f"{period_start.isoformat()}; expected PT60M or PT15M."
+        )
+
+    points = {
+        int(p.find(f"{namespace}position").text): float(p.find(f"{namespace}quantity").text)  # type: ignore
+        for p in period.findall(f"{namespace}Point")
+    }
+
+    if not points:
+        return []
+
+    if curve_type == "A03":
+        end_str = period.find(f"{namespace}timeInterval/{namespace}end").text  # type: ignore
+        period_end = pd.to_datetime(end_str).tz_convert("UTC")
+        step = timedelta(minutes=_RESOLUTION_MINUTES[resolution])
+        points = _expand_curve(points, int((period_end - period_start) / step))
+
+    if resolution == "PT15M":
+        return _quarter_hours_to_hourly(period_start, points)
+
+    # Fill gaps by iterating through expected positions
+    return [
+        {"timestamp": period_start + timedelta(hours=pos - 1), "value_mwh": points.get(pos)}
+        for pos in range(1, max(points) + 1)
+    ]
+
+
 class EntsoEClient:
     """Client for the ENTSO-E Transparency Platform API."""
 
@@ -196,41 +253,24 @@ class EntsoEClient:
 
         rows = []
         for ts in root.findall(f".//{namespace}TimeSeries"):
-            period = ts.find(f"{namespace}Period")
-            if period is None:
-                continue
-
-            start_str = period.find(f"{namespace}timeInterval/{namespace}start").text  # type: ignore
-            period_start = pd.to_datetime(start_str).tz_convert("UTC")
-
-            # Positions are only meaningful with a known resolution; mapping any
-            # other resolution to hours would silently shift timestamps (spec 013).
-            resolution = period.find(f"{namespace}resolution").text  # type: ignore
-            if resolution not in ("PT60M", "PT15M"):
+            # Unexpected document content fails ingestion instead of being
+            # guessed at (spec 014 T1b, ADR-0004); a missing element counts as
+            # unexpected.
+            curve_el = ts.find(f"{namespace}curveType")
+            curve_type = curve_el.text if curve_el is not None else None
+            if curve_type not in ("A01", "A03"):
                 raise ValueError(
-                    f"Unsupported ENTSO-E resolution {resolution} for period starting "
-                    f"{period_start.isoformat()}; expected PT60M or PT15M."
+                    f"Unsupported ENTSO-E curveType {curve_type}; expected A01 or A03."
                 )
+            unit_el = ts.find(f"{namespace}quantity_Measure_Unit.name")
+            unit = unit_el.text if unit_el is not None else None
+            if unit != "MAW":
+                raise ValueError(f"Unsupported ENTSO-E quantity unit {unit}; expected MAW.")
 
-            points = {
-                int(p.find(f"{namespace}position").text): float(p.find(f"{namespace}quantity").text)  # type: ignore
-                for p in period.findall(f"{namespace}Point")
-            }
-
-            if not points:
-                continue
-
-            if resolution == "PT15M":
-                rows.extend(_quarter_hours_to_hourly(period_start, points))
-                continue
-
-            # Fill gaps by iterating through expected positions
-            max_pos = max(points.keys())
-            for pos in range(1, max_pos + 1):
-                val = points.get(pos)
-                rows.append(
-                    {"timestamp": period_start + timedelta(hours=pos - 1), "value_mwh": val}
-                )
+            # A series can hold several Periods (spec 014 T1); reading only the
+            # first one silently dropped the rest.
+            for period in ts.findall(f"{namespace}Period"):
+                rows.extend(_parse_period(period, namespace, curve_type))
 
         return rows
 
@@ -242,8 +282,14 @@ class EntsoEClient:
 class OpenMeteoClient:
     """Client for the OpenMeteo Forecast API."""
 
-    def __init__(self) -> None:
-        """Initializes the client with a retry session."""
+    def __init__(self, base_url: str = OPENMETEO_BASE_URL) -> None:
+        """Initializes the client with a retry session.
+
+        Args:
+            base_url: Forecast endpoint; the backfill passes the Historical
+                Forecast API, which takes the same parameters (spec 014 T3).
+        """
+        self.base_url = base_url
         self.session = build_retry_session()
 
     def fetch_weather(
@@ -271,7 +317,7 @@ class OpenMeteoClient:
         }
 
         logger.info("Fetching OpenMeteo weather from %s to %s", start_date, end_date)
-        response = self.session.get(OPENMETEO_BASE_URL, params=params, timeout=HTTP_TIMEOUT_SECONDS)
+        response = self.session.get(self.base_url, params=params, timeout=HTTP_TIMEOUT_SECONDS)
         response.raise_for_status()
 
         data = response.json()
