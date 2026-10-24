@@ -111,7 +111,13 @@ root_path = str(Path(os.getcwd()).parent)
 if root_path not in sys.path:
     sys.path.append(root_path)
 
-from src.config import MODEL_INPUT_FEATURES, PATHS, RETRAIN_FLAG_PATH, SCHEMA
+from src.config import (
+    CURRENT_DATA_VERSION,
+    MODEL_INPUT_FEATURES,
+    PATHS,
+    RETRAIN_FLAG_PATH,
+    SCHEMA,
+)
 from src.drift import count_consecutive_drift_hours, decide_retrain, select_drift_columns
 from src.promotion import pick_production_run
 from src.retrain_trigger import trigger_retraining_job
@@ -200,7 +206,8 @@ def get_reference_window(
             experiment_ids=[e.experiment_id for e in mlflow_client.search_experiments()],
             filter_string=(
                 f"tags.model_name = '{config['primary_model_name']}' "
-                "AND tags.production = 'true' AND tags.leak_affected = 'false'"
+                "AND tags.production = 'true' AND tags.leak_affected = 'false' "
+                f"AND tags.data_version = '{CURRENT_DATA_VERSION}'"
             ),
             max_results=50,
         )

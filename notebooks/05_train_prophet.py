@@ -54,6 +54,7 @@ from pyspark.sql import functions as F
 
 from src.baseline import compute_naive_baseline_metrics
 from src.config import CATALOG, PATHS
+from src.data_version import read_data_version, table_properties
 from src.promotion import BACKTEST_ARTIFACT
 from src.splits import make_prophet_rolling_origins
 
@@ -181,6 +182,7 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str) -
         training_data_start = df["ds"].min()  # earliest row any fold could have used
         mlflow.set_tag("model_name", model_name)
         mlflow.set_tag("leak_affected", "false")
+        mlflow.set_tag("data_version", CONFIG["data_version"])
         mlflow.set_tag("training_data_end", training_data_end.isoformat())
         mlflow.set_tag("training_data_start", training_data_start.isoformat())
         mlflow.set_tag("evaluation_method", "rolling_origin")
@@ -247,6 +249,12 @@ def train_prophet_model(df: pd.DataFrame, horizon_hours: int, model_name: str) -
 
 # Main execution
 spark.sql(f"USE CATALOG {CATALOG}")
+# Read the version before the data: a rebuild finishing in between leaves the
+# run tagged with the older version, which is never served (ADR-0003).
+CONFIG["data_version"] = read_data_version(
+    table_properties(spark.sql(f"SHOW TBLPROPERTIES {CONFIG['silver_table']}").collect())
+)
+logger.info(f"Silver data_version: {CONFIG['data_version']}")
 pdf = spark.read.table(CONFIG["silver_table"]).filter(F.col("value_mwh").isNotNull()).toPandas()
 pdf = pdf.rename(columns={"timestamp": "ds", "value_mwh": "y"})
 pdf["ds"] = pd.to_datetime(pdf["ds"]).dt.tz_localize(None)

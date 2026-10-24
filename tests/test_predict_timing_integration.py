@@ -89,6 +89,7 @@ def _load_notebook_functions(*names: str, **overrides) -> dict:
         "NAIVE_MODEL_NAME": "seasonal_naive",
         "NAIVE_MODEL_VERSION": "seasonal_naive_t-168h",
         "HUNGARIAN_HOLIDAYS": set(),
+        "CURRENT_DATA_VERSION": "2",
         **overrides,
     }
     exec(compile(tree, str(NOTEBOOK_PATH), "exec"), namespace)
@@ -391,7 +392,7 @@ SERVE_FUNCTIONS = (
 
 
 def _run(run_id, *, production=True, promoted_at=None, mape=None):
-    tags = {"model_name": "energy_lgbm_24h", "leak_affected": "false"}
+    tags = {"model_name": "energy_lgbm_24h", "leak_affected": "false", "data_version": "2"}
     if production:
         tags["production"] = "true"
     if promoted_at:

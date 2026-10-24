@@ -30,6 +30,7 @@ def _load_notebook_functions(*names: str) -> dict:
         "BENCHMARK_ONLY_REASON": BENCHMARK_ONLY_REASON,
         "is_promotable": is_promotable,
         "pick_production_run": pick_production_run,
+        "CURRENT_DATA_VERSION": "2",
     }
     exec(compile(tree, str(NOTEBOOK_PATH), "exec"), namespace)
     return {name: namespace[name] for name in names}

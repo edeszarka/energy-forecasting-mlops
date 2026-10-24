@@ -45,7 +45,14 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-from src.config import CATALOG, EVALUATED_MODELS, MODEL_INPUT_FEATURES, PATHS, SCHEMA
+from src.config import (
+    CATALOG,
+    CURRENT_DATA_VERSION,
+    EVALUATED_MODELS,
+    MODEL_INPUT_FEATURES,
+    PATHS,
+    SCHEMA,
+)
 from src.promotion import (
     BACKTEST_ARTIFACT,
     MIN_COMMON_ROWS,
@@ -81,7 +88,10 @@ def get_challenger_run(model_name: str):
     """The challenger is the latest valid run for this model (just trained by 05/06)."""
     runs = client.search_runs(
         experiment_ids=EXPERIMENT_IDS,
-        filter_string=f"tags.model_name = '{model_name}' AND tags.leak_affected = 'false'",
+        filter_string=(
+            f"tags.model_name = '{model_name}' AND tags.leak_affected = 'false' "
+            f"AND tags.data_version = '{CURRENT_DATA_VERSION}'"
+        ),
         order_by=["attributes.start_time DESC"],
         max_results=1,
     )
@@ -95,7 +105,8 @@ def get_champion_run(model_name: str, challenger_run_id: str):
         experiment_ids=EXPERIMENT_IDS,
         filter_string=(
             f"tags.model_name = '{model_name}' AND tags.production = 'true' "
-            "AND tags.leak_affected = 'false'"
+            "AND tags.leak_affected = 'false' "
+            f"AND tags.data_version = '{CURRENT_DATA_VERSION}'"
         ),
         max_results=50,
     )
@@ -231,8 +242,14 @@ for name in EVALUATED_MODELS:
     else:
         comparison = compare_on_common_window(challenger, champion, name, horizon)
 
+    # Without a champion the challenger must beat the naive baseline logged on
+    # its own test rows (spec 014 T7).
     challenger_wins, decision_reason = decide_promotion(
-        comparison["champion_mape"], comparison["challenger_mape"], THRESHOLD, first_run
+        comparison["champion_mape"],
+        comparison["challenger_mape"],
+        THRESHOLD,
+        first_run,
+        challenger_naive_mape=challenger.data.metrics.get("naive_mape"),
     )
     challenger_wins, decision_reason = apply_benchmark_policy(
         name, challenger_wins, decision_reason

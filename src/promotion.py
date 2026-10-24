@@ -86,16 +86,19 @@ def decide_promotion(
     threshold: float,
     first_run: bool,
     force: bool = False,
+    challenger_naive_mape: float | None = None,
 ) -> tuple[bool, str]:
     """Champion/challenger rule: promote only on > `threshold` relative MAPE gain.
 
     When the challenger is not clearly better, the champion stays and nothing
-    changes in production.
+    changes in production. Without a champion (`first_run`) the challenger must
+    beat the naive baseline logged on its own test rows (`challenger_naive_mape`),
+    otherwise serving stays on seasonal naive (spec 014 T7).
     """
     if force:
         return True, "Force promotion requested via widget"
     if first_run:
-        return True, "No Production run exists — promoting unconditionally"
+        return _decide_first_run(challenger_mape, challenger_naive_mape)
     if challenger_mape is None or pd.isna(challenger_mape):
         return False, "Invalid challenger metrics — keeping champion"
     if champion_mape is None or pd.isna(champion_mape) or champion_mape <= 0:
@@ -108,6 +111,26 @@ def decide_promotion(
         )
     return False, (
         f"Insufficient improvement ({improvement:.2%} <= {threshold:.2%}). Keeping champion."
+    )
+
+
+def _decide_first_run(challenger_mape: float | None, naive_mape: float | None) -> tuple[bool, str]:
+    """No production run exists: promote only if the challenger beats naive."""
+    if challenger_mape is None or pd.isna(challenger_mape):
+        return (
+            False,
+            "No Production run exists; invalid challenger metrics — serving seasonal naive",
+        )
+    if naive_mape is None or pd.isna(naive_mape):
+        return False, "No Production run exists; no naive_mape logged — serving seasonal naive"
+    if challenger_mape < naive_mape:
+        return True, (
+            f"No Production run exists; challenger beats naive "
+            f"({challenger_mape:.3f}% < {naive_mape:.3f}%)"
+        )
+    return False, (
+        f"No Production run exists; challenger does not beat naive "
+        f"({challenger_mape:.3f}% >= {naive_mape:.3f}%) — serving seasonal naive"
     )
 
 

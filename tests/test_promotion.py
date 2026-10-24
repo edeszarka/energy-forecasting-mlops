@@ -2,6 +2,7 @@
 Unit tests for champion/challenger logic in src/promotion.py (spec 011).
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -42,8 +43,35 @@ class TestDecidePromotion:
         promote, _ = decide_promotion(5.0, 4.99, 0.01, first_run=False)
         assert promote is False
 
-    def test_first_run_promotes_unconditionally(self):
-        assert decide_promotion(None, 9.0, 0.01, first_run=True)[0] is True
+    def test_first_run_promotes_when_challenger_beats_naive(self):
+        """AC8 (spec 014 T7): mape < naive_mape -> promoted."""
+        promote, reason = decide_promotion(
+            None, 9.0, 0.01, first_run=True, challenger_naive_mape=10.0
+        )
+        assert promote is True
+        assert "beats naive" in reason
+
+    @pytest.mark.parametrize("naive", [9.0, 8.5])
+    def test_first_run_not_promoted_unless_it_beats_naive(self, naive):
+        """AC8: mape >= naive_mape -> not promoted; seasonal naive keeps serving."""
+        promote, reason = decide_promotion(
+            None, 9.0, 0.01, first_run=True, challenger_naive_mape=naive
+        )
+        assert promote is False
+        assert "does not beat naive" in reason
+        assert "serving seasonal naive" in reason
+
+    @pytest.mark.parametrize(
+        ("challenger", "naive"), [(9.0, None), (9.0, float("nan")), (None, 10.0)]
+    )
+    def test_first_run_without_valid_metrics_is_not_promoted(self, challenger, naive):
+        promote, _ = decide_promotion(
+            None, challenger, 0.01, first_run=True, challenger_naive_mape=naive
+        )
+        assert promote is False
+
+    def test_force_still_promotes_a_first_run(self):
+        assert decide_promotion(None, 9.0, 0.01, first_run=True, force=True)[0] is True
 
     def test_force_overrides_worse_challenger(self):
         assert decide_promotion(4.0, 5.0, 0.01, first_run=False, force=True)[0] is True
@@ -146,7 +174,9 @@ class TestApplyBenchmarkPolicy:
         assert "improved" in reason  # original comparison is still reported
 
     def test_benchmark_first_run_never_wins(self):
-        promote, reason = decide_promotion(None, 9.0, 0.01, first_run=True)
+        promote, reason = decide_promotion(
+            None, 9.0, 0.01, first_run=True, challenger_naive_mape=10.0
+        )
         assert promote is True
 
         assert apply_benchmark_policy("energy_prophet_24h", promote, reason)[0] is False
@@ -155,3 +185,11 @@ class TestApplyBenchmarkPolicy:
         assert is_promotable("energy_lgbm_24h") is True
         for name in ("energy_prophet_24h", "energy_lgbm_168h", "seasonal_naive"):
             assert is_promotable(name) is False
+
+
+def test_07_passes_the_challenger_naive_mape():
+    """T7: 07 hands the challenger's logged naive_mape to the first-run rule."""
+    source = (Path(__file__).resolve().parents[1] / "notebooks" / "07_evaluate.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'challenger_naive_mape=challenger.data.metrics.get("naive_mape")' in source

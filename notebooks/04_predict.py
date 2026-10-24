@@ -59,7 +59,7 @@ from pyspark.sql.types import (
 )
 
 from src.baseline import seasonal_naive_forecast
-from src.config import CATALOG, MODEL_INPUT_FEATURES, PATHS
+from src.config import CATALOG, CURRENT_DATA_VERSION, MODEL_INPUT_FEATURES, PATHS
 from src.forecast_timing import (
     SERVED_MODEL,
     resolve_target_timestamp,
@@ -142,7 +142,8 @@ def load_production_model(model_name: str, mlflow_client: MlflowClient):
         experiment_ids=exp_ids,
         filter_string=(
             f"tags.model_name = '{model_name}' AND tags.production = 'true' "
-            "AND tags.leak_affected = 'false'"
+            "AND tags.leak_affected = 'false' "
+            f"AND tags.data_version = '{CURRENT_DATA_VERSION}'"
         ),
         max_results=50,
     )
