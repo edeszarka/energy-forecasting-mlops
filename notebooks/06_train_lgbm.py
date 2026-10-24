@@ -21,9 +21,9 @@ if root_path not in sys.path:
 
 # %% [markdown]
 # # 06_train_lgbm
-# **Purpose:** Train two LightGBM models (24h and 168h horizons) using a direct multi-step approach.
+# **Purpose:** Train the 24h LightGBM model using a direct multi-step approach (ADR-0001: 24h only).
 # **Inputs:** `workspace.energy_forecasting.silver_features`
-# **Outputs:** Registered MLflow models: `energy_lgbm_24h`, `energy_lgbm_168h`
+# **Outputs:** MLflow run tagged `model_name=energy_lgbm_24h`
 # **Last Updated:** 2024-05-21
 #
 # **Required Libraries:** lightgbm==4.3.0, shap==0.45.0, pandas, numpy, mlflow, matplotlib
@@ -220,9 +220,7 @@ results = []
 parent_run_name = f"lgbm_training_{datetime.now(UTC).strftime('%Y%m%d_%H%M')}"
 
 with mlflow.start_run(run_name=parent_run_name):
-    res_24 = train_lgbm_model(pdf, 24, "energy_lgbm_24h")
-    res_168 = train_lgbm_model(pdf, 168, "energy_lgbm_168h")
-    results.extend([res_24, res_168])
+    results.append(train_lgbm_model(pdf, 24, "energy_lgbm_24h"))
 
 print("\nLightGBM Training Summary:")
 print(pd.DataFrame(results).to_string(index=False))

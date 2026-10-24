@@ -14,8 +14,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.config import PROMOTABLE_MODELS
+
 # Name of the per-row backtest artifact logged by 05/06 and read by 07.
 BACKTEST_ARTIFACT: str = "backtest_predictions.json"
+
+BENCHMARK_ONLY_REASON: str = "Benchmark-only model (ADR-0002) — never promoted."
 
 # Minimum number of shared out-of-sample rows needed for a same-window
 # comparison. Prophet's rolling-origin backtest only has n_folds targets.
@@ -105,3 +109,19 @@ def decide_promotion(
     return False, (
         f"Insufficient improvement ({improvement:.2%} <= {threshold:.2%}). Keeping champion."
     )
+
+
+def is_promotable(model_name: str) -> bool:
+    """Only PROMOTABLE_MODELS may ever be production-tagged (ADR-0002)."""
+    return model_name in PROMOTABLE_MODELS
+
+
+def apply_benchmark_policy(model_name: str, challenger_wins: bool, reason: str) -> tuple[bool, str]:
+    """Overrides a promotion decision for benchmark-only models.
+
+    Applied after decide_promotion, so it also covers first_run and force: the
+    comparison is still computed and reported, but a benchmark never wins.
+    """
+    if is_promotable(model_name):
+        return challenger_wins, reason
+    return False, f"{BENCHMARK_ONLY_REASON} {reason}".strip()

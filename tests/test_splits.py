@@ -50,16 +50,15 @@ def test_validation_window_size_matches_val_days():
 
 
 def test_train_keeps_min_rows_at_current_volume():
-    # silver_features ~1,900 rows; dropna leaves N - horizon usable rows.
+    # silver_features ~1,900 rows; dropna leaves N - horizon usable rows (24h only, ADR-0001).
     # With val_days=5, test_days=5 the train window must stay >= MIN_TRAINING_ROWS (720).
-    for horizon_hours in (24, 168):
-        usable_rows = 1900 - horizon_hours
-        ts = _hourly_timestamps(usable_rows)
-        train_mask, val_mask, test_mask = make_holdout_splits(ts, val_days=5, test_days=5)
+    usable_rows = 1900 - 24
+    ts = _hourly_timestamps(usable_rows)
+    train_mask, val_mask, test_mask = make_holdout_splits(ts, val_days=5, test_days=5)
 
-        assert train_mask.sum() >= 720
-        assert val_mask.sum() == 5 * 24
-        assert test_mask.sum() == 5 * 24
+    assert train_mask.sum() >= 720
+    assert val_mask.sum() == 5 * 24
+    assert test_mask.sum() == 5 * 24
 
 
 def test_train_window_shrinks_when_val_days_increases():

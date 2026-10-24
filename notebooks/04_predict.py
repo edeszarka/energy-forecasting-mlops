@@ -28,7 +28,8 @@ if root_path not in sys.path:
 
 # %% [markdown]
 # # 04_predict
-# **Purpose:** Load Production models from MLflow, generate 24h and 168h forecasts, and backfill past actuals.
+# **Purpose:** Load the production LightGBM 24h run from MLflow, generate 24h forecasts, and backfill
+# past actuals. If no production run can be used, serve a seasonal-naive forecast (ADR-0002).
 # **Inputs:** `workspace.energy_forecasting.silver_features`, MLflow Model Registry
 # **Outputs:** `workspace.energy_forecasting.gold_forecasts`
 # **Last Updated:** 2024-05-21
@@ -57,8 +58,15 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
+from src.baseline import seasonal_naive_forecast
 from src.config import CATALOG, MODEL_INPUT_FEATURES, PATHS
-from src.forecast_timing import resolve_target_timestamp
+from src.forecast_timing import (
+    SERVED_MODEL,
+    resolve_target_timestamp,
+    serving_anchor_timestamps,
+    serving_target_timestamps,
+)
+from src.promotion import pick_production_run
 
 # COMMAND ----------
 
@@ -66,7 +74,10 @@ from src.forecast_timing import resolve_target_timestamp
 # ─────────────────────────────
 
 dbutils.widgets.text("force_backfill", "false")
-dbutils.widgets.text("horizon_hours", "both")
+
+HORIZON_HOURS = 24  # ADR-0001: 24h only
+NAIVE_MODEL_NAME = "seasonal_naive"
+NAIVE_MODEL_VERSION = "seasonal_naive_t-168h"
 
 try:
     pipeline_run_id = (
@@ -83,7 +94,6 @@ CONFIG = {
     "silver_table": PATHS.table_silver,
     "forecast_table": PATHS.table_gold,
     "force_backfill": dbutils.widgets.get("force_backfill").lower() == "true",
-    "horizon_hours": dbutils.widgets.get("horizon_hours"),
     "pipeline_run_id": pipeline_run_id,
 }
 
@@ -117,76 +127,36 @@ class ModelNotFoundError(Exception):
 # ───────────────────────────────────────────────────────────────────────
 
 
-def load_best_model_from_runs(model_name: str, mlflow_client: MlflowClient):
+def load_production_model(model_name: str, mlflow_client: MlflowClient):
     """
-    Searches across all experiments for the latest successful run of a model
-    and loads its artifact. This replaces the Registry-based loading.
+    Loads the production-tagged run of `model_name`, chosen with
+    pick_production_run (latest promoted_at) — the same rule 07/08/03 use.
+    Never falls back to an unpromoted run (ADR-0002); the caller serves
+    seasonal naive instead.
+
+    Raises:
+        ModelNotFoundError: If no production run exists.
     """
-    try:
-        # Search all available experiments
-        exp_ids = [e.experiment_id for e in mlflow_client.search_experiments()]
+    exp_ids = [e.experiment_id for e in mlflow_client.search_experiments()]
+    runs = mlflow_client.search_runs(
+        experiment_ids=exp_ids,
+        filter_string=(
+            f"tags.model_name = '{model_name}' AND tags.production = 'true' "
+            "AND tags.leak_affected = 'false'"
+        ),
+        max_results=50,
+    )
+    run = pick_production_run(runs)
+    if run is None:
+        raise ModelNotFoundError(f"No production run found for {model_name}.")
 
-        # 1. Try to find the run tagged as 'production'
-        runs = mlflow_client.search_runs(
-            experiment_ids=exp_ids,
-            filter_string=f"tags.model_name = '{model_name}' AND tags.production = 'true' AND tags.leak_affected = 'false'",
-            order_by=["metrics.mape ASC"],
-            max_results=1,
-        )
+    run_id = run.info.run_id
+    model = mlflow.lightgbm.load_model(f"runs:/{run_id}/model")
 
-        best_run = runs[0] if runs else None
-
-        # 2. Fallback: just get the best historic run (useful for first-time runs)
-        if not best_run:
-            logger.info(
-                f"No production run found for {model_name}, searching for best historic run."
-            )
-            runs = mlflow_client.search_runs(
-                experiment_ids=exp_ids,
-                filter_string=f"tags.model_name = '{model_name}' AND tags.leak_affected = 'false'",
-                order_by=["metrics.mape ASC"],
-                max_results=1,
-            )
-            best_run = runs[0] if runs else None
-
-        if not best_run:
-            raise ModelNotFoundError(f"No successful runs found for {model_name}.")
-
-        run_id = best_run.info.run_id
-        model_uri = f"runs:/{run_id}/model"
-
-        if "lgbm" in model_name:
-            model = mlflow.lightgbm.load_model(model_uri)
-        elif "prophet" in model_name:
-            model = mlflow.prophet.load_model(model_uri)
-        else:
-            model = mlflow.pyfunc.load_model(model_uri)
-
-        logger.info(
-            f"Loaded {model_name} from Run ID {run_id} (MAPE: {best_run.data.metrics.get('mape'):.4f})"
-        )
-        return model, "run_latest", run_id
-    except Exception as e:
-        if isinstance(e, ModelNotFoundError):
-            raise
-        raise RuntimeError(f"Error searching for {model_name}: {e}") from e
-
-
-def load_models_with_fallback(config: dict, mlflow_client: MlflowClient):
-    """Tries LGBM, falls back to Prophet if missing."""
-    loaded = {}
-    for h in [24, 168]:
-        primary = f"energy_lgbm_{h}h"
-        fallback = f"energy_prophet_{h}h"
-        try:
-            loaded[h] = load_best_model_from_runs(primary, mlflow_client)
-        except ModelNotFoundError:
-            logger.warning(f"{primary} not found in runs, trying fallback {fallback}")
-            try:
-                loaded[h] = load_best_model_from_runs(fallback, mlflow_client)
-            except ModelNotFoundError as err:
-                raise RuntimeError(f"No successful runs available for horizon {h}h.") from err
-    return loaded
+    mape = run.data.metrics.get("mape")
+    mape_str = f"{mape:.4f}" if mape is not None else "n/a"
+    logger.info(f"Loaded {model_name} from Run ID {run_id} (MAPE: {mape_str})")
+    return model, "run_latest", run_id
 
 
 # COMMAND ----------
@@ -195,12 +165,10 @@ def load_models_with_fallback(config: dict, mlflow_client: MlflowClient):
 # ────────────────────────────────────────────────
 
 
-def prepare_inference_features(
-    spark, config: dict, horizon_hours: int, forecast_run_at: datetime
-) -> pd.DataFrame:
-    """Builds future features."""
+def load_silver_history(spark, config: dict, horizon_hours: int) -> pd.DataFrame:
+    """Latest silver rows, shared by the LightGBM features and the seasonal-naive fallback."""
     history_limit = max(horizon_hours + 7 * 24, 200)
-    history_pd = (
+    return (
         spark.table(config["silver_table"])
         .orderBy(F.col("timestamp").desc())
         .limit(history_limit)
@@ -208,12 +176,16 @@ def prepare_inference_features(
         .sort_values("timestamp")
     )
 
+
+def prepare_inference_features(
+    history_pd: pd.DataFrame, horizon_hours: int, forecast_run_at: datetime
+) -> pd.DataFrame:
+    """Builds future features."""
     if len(history_pd) < 168:
         raise ValueError(f"Insufficient history: {len(history_pd)} rows. Need at least 168.")
 
     last_actual = history_pd["value_mwh"].dropna().iloc[-1]
-    start_ts = forecast_run_at.replace(minute=0, second=0, microsecond=0)
-    future_ts = [start_ts + timedelta(hours=i) for i in range(1, horizon_hours + 1)]
+    future_ts = serving_anchor_timestamps(forecast_run_at, horizon_hours)
 
     future_rows = []
     for t in future_ts:
@@ -337,6 +309,80 @@ def generate_forecasts(
     return pd.DataFrame(output_rows)
 
 
+def generate_naive_forecasts(
+    history_pd: pd.DataFrame,
+    target_timestamps: list,
+    horizon_hours: int,
+    forecast_run_at: datetime,
+    config: dict,
+) -> pd.DataFrame:
+    """Seasonal-naive gold rows (ADR-0002) for exactly the given target hours."""
+    naive = seasonal_naive_forecast(history_pd, target_timestamps)
+    skipped = len(target_timestamps) - len(naive)
+    if skipped:
+        logger.warning(f"Seasonal naive: skipped {skipped} targets with no T-168h value in silver.")
+
+    output_rows = []
+    for target_ts, pred in zip(naive["timestamp"], naive["predicted_mwh"], strict=True):
+        f_id = hashlib.md5(
+            f"{NAIVE_MODEL_NAME}_{horizon_hours}_{target_ts.isoformat()}".encode()
+        ).hexdigest()
+        output_rows.append(
+            {
+                "forecast_id": f_id,
+                "timestamp": target_ts,
+                "forecast_run_at": forecast_run_at,
+                "model_name": NAIVE_MODEL_NAME,
+                "model_version": NAIVE_MODEL_VERSION,
+                "horizon_hours": horizon_hours,
+                "predicted_mwh": float(pred),
+                "actual_mwh": None,
+                "is_backfilled": False,
+                "pipeline_run_id": config["pipeline_run_id"],
+                "created_at": datetime.now(UTC),
+            }
+        )
+
+    return pd.DataFrame(output_rows)
+
+
+def serve_forecasts(
+    history_pd: pd.DataFrame,
+    mlflow_client: MlflowClient,
+    horizon_hours: int,
+    forecast_run_at: datetime,
+    config: dict,
+) -> tuple[pd.DataFrame, str]:
+    """Production LightGBM forecasts, or seasonal naive if any model-side step fails.
+
+    Returns (forecasts_df, serving_mode). Both paths write the same target hours
+    (serving_target_timestamps). Errors that also break the naive path (no usable
+    silver history) still raise.
+    """
+    try:
+        model, ver, run_id = load_production_model(SERVED_MODEL, mlflow_client)
+        feats = prepare_inference_features(history_pd, horizon_hours, forecast_run_at)
+        forecasts_df = generate_forecasts(
+            model=model,
+            model_name=SERVED_MODEL,
+            model_version=ver,
+            run_id=run_id,
+            features_df=feats,
+            horizon_hours=horizon_hours,
+            forecast_run_at=forecast_run_at,
+            config=config,
+        )
+        return forecasts_df, SERVED_MODEL
+    except Exception as e:
+        logger.warning(f"Serving seasonal naive instead of {SERVED_MODEL}: {type(e).__name__}: {e}")
+
+    targets = serving_target_timestamps(forecast_run_at, horizon_hours)
+    forecasts_df = generate_naive_forecasts(
+        history_pd, targets, horizon_hours, forecast_run_at, config
+    )
+    return forecasts_df, NAIVE_MODEL_NAME
+
+
 # COMMAND ----------
 
 # SECTION 5 — WRITE FORECASTS TO DELTA
@@ -409,46 +455,14 @@ spark.sql(f"USE CATALOG {CATALOG}")
 mlflow_client = MlflowClient()
 forecast_run_at = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
 
-h_widget = CONFIG["horizon_hours"]
-horizons = [24, 168] if h_widget == "both" else [int(h_widget)]
-
-models_dict = load_models_with_fallback(CONFIG, mlflow_client)
-
-for h in horizons:
-    logger.info(f"Starting forecast for {h}h horizon...")
-    model, ver, r_id = models_dict[h]
-
-    # Determine actual model name from the loaded model object type
-    lgbm_name = f"energy_lgbm_{h}h"
-    prophet_name = f"energy_prophet_{h}h"
-
-    # Check model type directly from the object (Fixes feature mismatch errors)
-    model_type_name = type(model).__name__
-    if "LGBM" in model_type_name or "LightGBM" in model_type_name:
-        actual_model_name = lgbm_name
-    elif "Prophet" in model_type_name:
-        actual_model_name = prophet_name
-    else:
-        # Fallback: check if it has lgbm-specific methods
-        actual_model_name = lgbm_name if hasattr(model, "booster_") else prophet_name
-
-    feats = prepare_inference_features(spark, CONFIG, h, forecast_run_at)
-    forecasts_df = generate_forecasts(
-        model=model,
-        model_name=actual_model_name,
-        model_version=ver,
-        run_id=r_id,
-        features_df=feats,
-        horizon_hours=h,
-        forecast_run_at=forecast_run_at,
-        config=CONFIG,
-    )
-    write_forecasts(forecasts_df, spark, CONFIG, is_backfill=CONFIG["force_backfill"])
-    logger.info(
-        f"Horizon {h}h: wrote {len(forecasts_df)} forecast rows using {actual_model_name} v{ver}"
-    )
+history_pd = load_silver_history(spark, CONFIG, HORIZON_HOURS)
+forecasts_df, serving_mode = serve_forecasts(
+    history_pd, mlflow_client, HORIZON_HOURS, forecast_run_at, CONFIG
+)
+write_forecasts(forecasts_df, spark, CONFIG, is_backfill=CONFIG["force_backfill"])
+logger.info(
+    f"Horizon {HORIZON_HOURS}h: wrote {len(forecasts_df)} forecast rows (serving_mode={serving_mode})"
+)
 
 backfilled_count = backfill_actuals(spark, CONFIG)
 dbutils.notebook.exit("SUCCESS")
-
-# FIX APPLIED: Corrected model name resolution logic to distinguish between primary (LGBM) and fallback (Prophet) loaded models using run_id comparison.

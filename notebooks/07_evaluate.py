@@ -45,12 +45,14 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-from src.config import CATALOG, MODEL_INPUT_FEATURES, PATHS, SCHEMA
+from src.config import CATALOG, EVALUATED_MODELS, MODEL_INPUT_FEATURES, PATHS, SCHEMA
 from src.promotion import (
     BACKTEST_ARTIFACT,
     MIN_COMMON_ROWS,
+    apply_benchmark_policy,
     calculate_mape,
     decide_promotion,
+    is_promotable,
     pick_production_run,
     select_common_window,
     served_data_end,
@@ -202,17 +204,17 @@ def compare_on_common_window(challenger, champion, model_name: str, horizon: int
 spark.sql(f"USE CATALOG {CATALOG}")
 spark.sql(f"CREATE DATABASE IF NOT EXISTS {SCHEMA}")
 
-model_names = ["energy_prophet_24h", "energy_prophet_168h", "energy_lgbm_24h", "energy_lgbm_168h"]
 eval_rows = []
 
-for name in model_names:
-    horizon = 24 if "24h" in name else 168
+for name in EVALUATED_MODELS:
+    horizon = 24  # ADR-0001: 24h only
 
     challenger = get_challenger_run(name)
     if challenger is None:
         logger.warning(f"No challenger run found for {name}. Skipping.")
         continue
-    if challenger.data.tags.get("production") == "true":
+    # Benchmarks always get a row: historic Prophet runs keep their production tag.
+    if is_promotable(name) and challenger.data.tags.get("production") == "true":
         logger.info(f"{name}: latest run {challenger.info.run_id} is already production. Skipping.")
         continue
 
@@ -231,6 +233,9 @@ for name in model_names:
 
     challenger_wins, decision_reason = decide_promotion(
         comparison["champion_mape"], comparison["challenger_mape"], THRESHOLD, first_run
+    )
+    challenger_wins, decision_reason = apply_benchmark_policy(
+        name, challenger_wins, decision_reason
     )
     logger.info(f"{name} [{comparison['comparison_method']}]: {decision_reason}")
 

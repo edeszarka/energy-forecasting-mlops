@@ -9,16 +9,24 @@ the mocking pattern established in ``tests/test_ingest_logic.py``.
 import ast
 import hashlib
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from src.baseline import seasonal_naive_forecast
 from src.config import MODEL_INPUT_FEATURES
-from src.forecast_timing import resolve_target_timestamp
+from src.forecast_timing import (
+    SERVED_MODEL,
+    resolve_target_timestamp,
+    serving_anchor_timestamps,
+    serving_target_timestamps,
+)
+from src.promotion import pick_production_run
 
 # pyspark is not a runtime/test dependency (see pyproject.toml); fall back to a
 # permissive mock so the notebook's StructType(...) schema construction still runs.
@@ -40,8 +48,16 @@ except ImportError:  # pragma: no cover
 NOTEBOOK_PATH = Path(__file__).resolve().parents[1] / "notebooks" / "04_predict.py"
 
 
-def _load_notebook_functions(*names: str) -> dict:
-    """Exec the named top-level functions from 04_predict.py in a stubbed namespace."""
+class ModelNotFoundError(Exception):
+    """Stand-in for the notebook's class (only FunctionDefs are extracted)."""
+
+
+def _load_notebook_functions(*names: str, **overrides) -> dict:
+    """Exec the named top-level functions from 04_predict.py in a stubbed namespace.
+
+    `overrides` replace namespace entries, e.g. a fake `mlflow` or a stub for a
+    notebook function that is deliberately not extracted.
+    """
     tree = ast.parse(NOTEBOOK_PATH.read_text(encoding="utf-8"))
     tree.body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     namespace = {
@@ -61,6 +77,19 @@ def _load_notebook_functions(*names: str) -> dict:
         "DoubleType": DoubleType,
         "BooleanType": BooleanType,
         "DeltaTable": _FakeDeltaTable,
+        # Spec 013 serving path
+        "timedelta": timedelta,
+        "MlflowClient": object,
+        "ModelNotFoundError": ModelNotFoundError,
+        "pick_production_run": pick_production_run,
+        "seasonal_naive_forecast": seasonal_naive_forecast,
+        "serving_anchor_timestamps": serving_anchor_timestamps,
+        "serving_target_timestamps": serving_target_timestamps,
+        "SERVED_MODEL": SERVED_MODEL,
+        "NAIVE_MODEL_NAME": "seasonal_naive",
+        "NAIVE_MODEL_VERSION": "seasonal_naive_t-168h",
+        "HUNGARIAN_HOLIDAYS": set(),
+        **overrides,
     }
     exec(compile(tree, str(NOTEBOOK_PATH), "exec"), namespace)
     return {name: namespace[name] for name in names}
@@ -224,29 +253,26 @@ def test_prophet_branch_strips_timezone_before_predict():
     assert list(result["timestamp"]) == list(features.index)
 
 
-@pytest.mark.parametrize("horizon_hours", [24, 168])
-def test_lgbm_timestamp_and_forecast_id_use_shifted_target(horizon_hours: int):
+def test_lgbm_timestamp_and_forecast_id_use_shifted_target():
     generate_forecasts = _load_notebook_functions("generate_forecasts")["generate_forecasts"]
-    features = _make_features(horizon_hours)
+    features = _make_features(24)
 
     result = generate_forecasts(
         model=_FakeLgbmModel(),
-        model_name=f"energy_lgbm_{horizon_hours}h",
+        model_name="energy_lgbm_24h",
         model_version="1",
         run_id="run-2",
         features_df=features,
-        horizon_hours=horizon_hours,
+        horizon_hours=24,
         forecast_run_at=datetime(2026, 8, 10, tzinfo=UTC),
         config={"pipeline_run_id": "test-run"},
     )
 
-    shifted = [anchor + pd.Timedelta(hours=horizon_hours) for anchor in features.index]
+    shifted = [anchor + pd.Timedelta(hours=24) for anchor in features.index]
     assert list(result["timestamp"]) == shifted
     # The bug is what we just fixed: stored timestamp must not be the anchor.
     assert list(result["timestamp"]) != list(features.index)
-    expected_ids = [
-        _fid(f"energy_lgbm_{horizon_hours}h", horizon_hours, target) for target in shifted
-    ]
+    expected_ids = [_fid("energy_lgbm_24h", 24, target) for target in shifted]
     assert list(result["forecast_id"]) == expected_ids
 
 
@@ -349,3 +375,202 @@ def test_write_forecasts_does_not_overwrite_actual_outside_backfill():
     # Backfill path is the only one allowed to update matched rows.
     write_forecasts(frame, spark, {"forecast_table": "gold"}, is_backfill=True)
     assert spark._store[first["forecast_id"]]["actual_mwh"] is None
+
+
+# ─────────────────── spec 013 T3: production run or seasonal naive ───────────────────
+
+RUN_AT = datetime(2026, 10, 24, 5, 0, tzinfo=UTC)
+SERVE_CONFIG = {"pipeline_run_id": "test-run"}
+SERVE_FUNCTIONS = (
+    "load_production_model",
+    "prepare_inference_features",
+    "generate_forecasts",
+    "generate_naive_forecasts",
+    "serve_forecasts",
+)
+
+
+def _run(run_id, *, production=True, promoted_at=None, mape=None):
+    tags = {"model_name": "energy_lgbm_24h", "leak_affected": "false"}
+    if production:
+        tags["production"] = "true"
+    if promoted_at:
+        tags["promoted_at"] = promoted_at
+    return SimpleNamespace(
+        info=SimpleNamespace(run_id=run_id, start_time=0),
+        data=SimpleNamespace(tags=tags, metrics={} if mape is None else {"mape": mape}),
+    )
+
+
+class _FakeMlflowClient:
+    """Applies the production filter the way MLflow would and records every filter."""
+
+    def __init__(self, runs, fail=False):
+        self.runs = runs
+        self.fail = fail
+        self.filters = []
+
+    def search_experiments(self):
+        if self.fail:
+            raise RuntimeError("MLflow unreachable")
+        return [SimpleNamespace(experiment_id="1")]
+
+    def search_runs(self, experiment_ids, filter_string, **kwargs):
+        self.filters.append(filter_string)
+        if "tags.production = 'true'" in filter_string:
+            return [r for r in self.runs if r.data.tags.get("production") == "true"]
+        return list(self.runs)
+
+
+class _RaisingModel:
+    def predict(self, x):
+        raise ValueError("predict exploded")
+
+
+def _fake_mlflow(model, loaded_uris):
+    def load_model(uri):
+        loaded_uris.append(uri)
+        return model
+
+    return SimpleNamespace(lightgbm=SimpleNamespace(load_model=load_model))
+
+
+def _silver_history(hours=200, end=None):
+    end = RUN_AT - pd.Timedelta(hours=1) if end is None else end
+    index = pd.date_range(end=pd.Timestamp(end), periods=hours, freq="h", name="timestamp")
+    return pd.DataFrame(
+        {
+            "timestamp": index,
+            "value_mwh": np.arange(hours, dtype=float) + 4000.0,
+            "temperature_c": 10.0,
+            "humidity_pct": 60.0,
+            "cloud_cover_pct": 20.0,
+        }
+    )
+
+
+def _serve(client, model=None, history=None, loaded_uris=None):
+    loaded_uris = [] if loaded_uris is None else loaded_uris
+    fns = _load_notebook_functions(
+        *SERVE_FUNCTIONS, mlflow=_fake_mlflow(model or _FakeLgbmModel(), loaded_uris)
+    )
+    history = _silver_history() if history is None else history
+    return fns["serve_forecasts"](history, client, 24, RUN_AT, SERVE_CONFIG)
+
+
+def _expected_targets():
+    return serving_target_timestamps(RUN_AT, 24)
+
+
+def test_serves_production_lgbm_run_on_lgbm_targets():
+    loaded = []
+    client = _FakeMlflowClient([_run("prod", promoted_at="2026-10-21T21:15:08+00:00", mape=8.39)])
+
+    result, mode = _serve(client, loaded_uris=loaded)
+
+    assert mode == "energy_lgbm_24h"
+    assert loaded == ["runs:/prod/model"]
+    assert set(result["model_name"]) == {"energy_lgbm_24h"}
+    assert list(result["timestamp"]) == _expected_targets()  # run+25 … run+48
+
+
+def test_ac3_unpromoted_best_mape_run_is_never_loaded():
+    loaded = []
+    client = _FakeMlflowClient([_run("best-mape", production=False, mape=0.5)])
+
+    result, mode = _serve(client, loaded_uris=loaded)
+
+    assert mode == "seasonal_naive"
+    assert loaded == []  # LightGBM never loaded
+    assert all("tags.production = 'true'" in f for f in client.filters)
+    assert set(result["model_name"]) == {"seasonal_naive"}
+    assert set(result["model_version"]) == {"seasonal_naive_t-168h"}
+    assert set(result["horizon_hours"]) == {24}
+
+
+def test_ac4_latest_promoted_at_wins_over_lowest_mape():
+    loaded = []
+    client = _FakeMlflowClient(
+        [
+            _run("old-low-mape", promoted_at="2026-10-01T00:00:00+00:00", mape=1.0),
+            _run("new-high-mape", promoted_at="2026-10-21T21:15:08+00:00", mape=9.0),
+        ]
+    )
+
+    _, mode = _serve(client, loaded_uris=loaded)
+
+    assert mode == "energy_lgbm_24h"
+    assert loaded == ["runs:/new-high-mape/model"]
+
+
+def test_production_run_without_mape_metric_still_serves():
+    loaded = []
+    client = _FakeMlflowClient([_run("prod-no-mape", promoted_at="2026-10-21T21:15:08+00:00")])
+
+    _, mode = _serve(client, loaded_uris=loaded)
+
+    assert mode == "energy_lgbm_24h"
+    assert loaded == ["runs:/prod-no-mape/model"]
+
+
+def test_ac5_loader_error_falls_back_to_naive():
+    client = _FakeMlflowClient([_run("prod")], fail=True)
+
+    result, mode = _serve(client)
+
+    assert mode == "seasonal_naive"
+    assert list(result["timestamp"]) == _expected_targets()
+
+
+def test_ac5_feature_build_error_falls_back_to_naive():
+    # 30 rows are too few for LightGBM features (< 168) but cover every T-168h source hour.
+    history = _silver_history(hours=30, end=RUN_AT - pd.Timedelta(hours=116))
+    client = _FakeMlflowClient([_run("prod", promoted_at="2026-10-21T21:15:08+00:00")])
+
+    result, mode = _serve(client, history=history)
+
+    assert mode == "seasonal_naive"
+    assert list(result["timestamp"]) == _expected_targets()
+
+
+def test_ac5_predict_error_falls_back_to_naive():
+    client = _FakeMlflowClient([_run("prod", promoted_at="2026-10-21T21:15:08+00:00")])
+
+    result, mode = _serve(client, model=_RaisingModel())
+
+    assert mode == "seasonal_naive"
+    assert len(result) == 24
+
+
+def test_ac6_naive_rows_use_t_minus_168h_and_lgbm_targets():
+    history = _silver_history()
+    value_by_ts = history.set_index("timestamp")["value_mwh"]
+    client = _FakeMlflowClient([])
+
+    result, mode = _serve(client, history=history)
+
+    assert mode == "seasonal_naive"
+    assert list(result["timestamp"]) == _expected_targets()
+    for target, predicted in zip(result["timestamp"], result["predicted_mwh"], strict=True):
+        assert predicted == value_by_ts[target - pd.Timedelta(hours=168)]
+    expected_ids = [_fid("seasonal_naive", 24, t) for t in _expected_targets()]
+    assert list(result["forecast_id"]) == expected_ids
+
+
+def test_ac6_naive_skips_targets_without_source_value():
+    history = _silver_history()
+    missing = _expected_targets()[0] - pd.Timedelta(hours=168)
+    history = history[history["timestamp"] != missing]
+
+    result, mode = _serve(_FakeMlflowClient([]), history=history)
+
+    assert mode == "seasonal_naive"
+    assert len(result) == 23
+    assert _expected_targets()[0] not in set(result["timestamp"])
+
+
+def test_ac6_naive_raises_when_silver_too_stale():
+    history = _silver_history(end=RUN_AT - pd.Timedelta(hours=200))
+
+    with pytest.raises(ValueError, match="no T-168h value"):
+        _serve(_FakeMlflowClient([]), history=history)

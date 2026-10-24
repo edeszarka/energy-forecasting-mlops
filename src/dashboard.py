@@ -342,15 +342,13 @@ st.sidebar.markdown("---")
 
 # ── Tabs ─────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4 = st.tabs(["24h Forecast", "168h Forecast", "MAE Trend", "Data Drift"])
+tab1, tab2, tab3 = st.tabs(["24h Forecast", "MAE Trend", "Data Drift"])
 
 with tab1:
     forecast_tab(24, "24h")
 with tab2:
-    forecast_tab(168, "168h")
-with tab3:
     mae_trend_tab()
-with tab4:
+with tab3:
     drift_tab()
 
 st.sidebar.markdown("---")

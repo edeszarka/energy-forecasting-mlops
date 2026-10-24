@@ -56,7 +56,7 @@ from pyspark.sql.types import (
 from pyspark.sql.window import Window
 
 from src.config import CATALOG, PATHS, RETRAIN_FLAG_PATH
-from src.promotion import pick_production_run
+from src.promotion import BENCHMARK_ONLY_REASON, is_promotable, pick_production_run
 
 # COMMAND ----------
 
@@ -71,12 +71,6 @@ CONFIG = {
     "eval_table": PATHS.table_eval,
     "promotion_log_table": PATHS.table_promotion,
     "flag_path": RETRAIN_FLAG_PATH,
-    "model_names": [
-        "energy_lgbm_24h",
-        "energy_lgbm_168h",
-        "energy_prophet_24h",
-        "energy_prophet_168h",
-    ],
     "mape_threshold": float(dbutils.widgets.get("mape_improvement_threshold")),
     "dry_run": dbutils.widgets.get("dry_run").lower() == "true",
     "force_promote": dbutils.widgets.get("force_promote").lower() == "true",
@@ -164,7 +158,10 @@ def decide_promotions(
         current_id = current.info.run_id if current else None
 
         reason = row["decision_reason"] if pd.notna(row["decision_reason"]) else ""
-        if config["force_promote"]:
+        if not is_promotable(model_name):
+            # Checked before force_promote: a benchmark can never be tagged (ADR-0002).
+            should_promote, reason = False, BENCHMARK_ONLY_REASON
+        elif config["force_promote"]:
             should_promote, reason = True, "Force promotion requested via widget"
         elif current_id == row["challenger_run_id"]:
             should_promote, reason = False, "Challenger is already production — nothing to do"
@@ -213,6 +210,11 @@ def execute_promotions(decisions: list, mlflow_client: MlflowClient, config: dic
 
     for d in decisions:
         if not d["should_promote"]:
+            continue
+        if not is_promotable(d["model_name"]):
+            # Last line of defence: decide_promotions should never let this through.
+            logger.error(f"Refusing to tag non-promotable model {d['model_name']} (ADR-0002).")
+            d["should_promote"] = False
             continue
 
         try:

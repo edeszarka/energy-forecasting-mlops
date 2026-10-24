@@ -8,8 +8,11 @@ import pandas as pd
 import pytest
 
 from src.promotion import (
+    BENCHMARK_ONLY_REASON,
+    apply_benchmark_policy,
     calculate_mape,
     decide_promotion,
+    is_promotable,
     pick_production_run,
     select_common_window,
     served_data_end,
@@ -123,3 +126,32 @@ class TestHelpers:
 
     def test_to_naive_utc_converts_offsets(self):
         assert to_naive_utc("2026-10-01T02:00:00+02:00") == pd.Timestamp("2026-10-01 00:00:00")
+
+
+class TestApplyBenchmarkPolicy:
+    """AC2: benchmark-only models never win (ADR-0002)."""
+
+    def test_promotable_model_decision_unchanged(self):
+        for wins in (True, False):
+            assert apply_benchmark_policy("energy_lgbm_24h", wins, "reason") == (wins, "reason")
+
+    def test_benchmark_model_never_wins(self):
+        promote, reason = decide_promotion(5.0, 4.0, 0.01, first_run=False)
+        assert promote is True
+
+        promote, reason = apply_benchmark_policy("energy_prophet_24h", promote, reason)
+
+        assert promote is False
+        assert reason.startswith(BENCHMARK_ONLY_REASON)
+        assert "improved" in reason  # original comparison is still reported
+
+    def test_benchmark_first_run_never_wins(self):
+        promote, reason = decide_promotion(None, 9.0, 0.01, first_run=True)
+        assert promote is True
+
+        assert apply_benchmark_policy("energy_prophet_24h", promote, reason)[0] is False
+
+    def test_only_lgbm_24h_is_promotable(self):
+        assert is_promotable("energy_lgbm_24h") is True
+        for name in ("energy_prophet_24h", "energy_lgbm_168h", "seasonal_naive"):
+            assert is_promotable(name) is False
