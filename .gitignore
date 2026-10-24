@@ -230,7 +230,12 @@ __marimo__/
 
 # MD files
 energy_forecast_project_summary.md
-GEMINI.mddocs/
+GEMINI.md
+docs/*
+!docs/adr/
 
 # Others
-docs/
+backlog.md
+code_report.md
+/interview
+/reports
