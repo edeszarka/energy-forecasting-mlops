@@ -69,6 +69,28 @@ def build_retry_session() -> requests.Session:
     return session
 
 
+def _quarter_hours_to_hourly(
+    period_start: pd.Timestamp, points: dict[int, float]
+) -> list[dict[str, Any]]:
+    """Aggregates PT15M positions to hourly means.
+
+    Position p covers period_start + 15min * (p - 1). Every hour touched by the
+    period gets a row; an hour with fewer than 4 quarters present gets
+    value_mwh None (no partial means, spec 013 T4).
+    """
+    quarter = timedelta(minutes=15)
+    by_ts = {period_start + quarter * (pos - 1): val for pos, val in points.items()}
+    last_ts = period_start + quarter * (max(points) - 1)
+
+    rows: list[dict[str, Any]] = []
+    for hour in pd.date_range(period_start.floor("h"), last_ts.floor("h"), freq="h"):
+        quarters = [by_ts.get(hour + quarter * i) for i in range(4)]
+        present = [q for q in quarters if q is not None]
+        value = sum(present) / 4 if len(present) == 4 else None
+        rows.append({"timestamp": hour, "value_mwh": value})
+    return rows
+
+
 class EntsoEClient:
     """Client for the ENTSO-E Transparency Platform API."""
 
@@ -181,10 +203,14 @@ class EntsoEClient:
             start_str = period.find(f"{namespace}timeInterval/{namespace}start").text  # type: ignore
             period_start = pd.to_datetime(start_str).tz_convert("UTC")
 
-            # Resolution is typically PT60M for hourly
+            # Positions are only meaningful with a known resolution; mapping any
+            # other resolution to hours would silently shift timestamps (spec 013).
             resolution = period.find(f"{namespace}resolution").text  # type: ignore
-            if resolution != "PT60M":
-                logger.warning("Unexpected resolution: %s. Expected PT60M.", resolution)
+            if resolution not in ("PT60M", "PT15M"):
+                raise ValueError(
+                    f"Unsupported ENTSO-E resolution {resolution} for period starting "
+                    f"{period_start.isoformat()}; expected PT60M or PT15M."
+                )
 
             points = {
                 int(p.find(f"{namespace}position").text): float(p.find(f"{namespace}quantity").text)  # type: ignore
@@ -192,6 +218,10 @@ class EntsoEClient:
             }
 
             if not points:
+                continue
+
+            if resolution == "PT15M":
+                rows.extend(_quarter_hours_to_hourly(period_start, points))
                 continue
 
             # Fill gaps by iterating through expected positions
