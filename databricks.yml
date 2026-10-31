@@ -31,9 +31,9 @@ resources:
           notebook_task:
             notebook_path: ./notebooks/02_transform.py
             base_parameters:
-              # spec 014 T5: switched to "enforce" by a follow-up PR after the
-              # silver rebuild (runbook step 9).
-              dq_mode: "warn"
+              # spec 014 T5: enforce since the silver rebuild of 2026-10-31
+              # (runbook step 9); the rebuild dry run passed in enforce mode.
+              dq_mode: "enforce"
           environment_key: "default"
           timeout_seconds: 1800
 
