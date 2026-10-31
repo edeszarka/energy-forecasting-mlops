@@ -26,6 +26,8 @@ env:
   PYTHON_VERSION: "3.11"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   VOLUME_BACKFILL: "dbfs:/Volumes/workspace/energy_forecasting/data/raw_backfill"
+  # The repo root holds databricks.yml; without a target the CLI refuses non-bundle commands.
+  DATABRICKS_BUNDLE_TARGET: "prod"
 
 jobs:
   fetch_and_upload:
