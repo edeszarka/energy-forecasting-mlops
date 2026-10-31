@@ -133,7 +133,9 @@ RETRAINING_FLAG_TABLE: Final[str] = f"{CATALOG}.{SCHEMA}.retraining_flags"
 # to be calibrated on the rebuilt 2024-2025 silver (runbook step 6) in the
 # follow-up PR that switches dq_mode to enforce.
 # Observed hourly means 3,488-7,073 MW (Jan 2024 weekday peak to Oct 2026 night).
-LOAD_MIN_MW: Final[float] = 2500.0  # PROVISIONAL
+# Backfill dry run: lowest values 2211-2487 MW at midday on Easter 2025 and a
+# Sunday in May 2026 (holiday load minus rooftop solar), so 2500 was too tight.
+LOAD_MIN_MW: Final[float] = 2000.0  # calibrated on the 2024-01 → 2026-10 backfill (min 2211 MW)
 LOAD_MAX_MW: Final[float] = 9000.0  # PROVISIONAL
 # Observed lag-24h correlation 0.70-0.89 on healthy samples; the same samples
 # stretched 4x (pre-013 parser) give -0.36 to -0.14, the owner's corrupted
