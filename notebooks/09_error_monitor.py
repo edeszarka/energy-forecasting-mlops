@@ -180,6 +180,24 @@ def read_history(spark, check_time: datetime) -> tuple[list[str] | None, list, d
     return alerts, history, last_retrain[0][0]
 
 
+def trigger_already_recorded(spark, check_time: datetime) -> str | None:
+    """Reason of a retrain this same check already started, if any.
+
+    Databricks may retry a failed task within the hour; the retry must neither
+    start a second job nor overwrite retrain_triggered (the cooldown reads it).
+    """
+    rows = (
+        spark.table(PATHS.table_error_monitor)
+        .filter(F.col("check_timestamp") == F.lit(check_time))
+        .filter(F.col("stream") == SERVED_STREAM)
+        .filter(F.col("window_hours") == ERROR_ALERT_WINDOW_HOURS)
+        .filter(F.col("retrain_triggered"))
+        .select("retrain_reason")
+        .collect()
+    )
+    return rows[0]["retrain_reason"] if rows else None
+
+
 def write_monitor_rows(spark, rows: list[dict]) -> None:
     """MERGE on (check_timestamp, window_hours, stream), so a retried hour replaces its rows."""
     now = datetime.now(UTC)
@@ -217,7 +235,10 @@ consecutive, should_retrain, retrain_reason = decide_error_retrain(
     pending_since=read_pending_since(RETRAIN_FLAG_PATH),
 )
 retrain_run_id = None
-if should_retrain:
+recorded_reason = trigger_already_recorded(spark, check_time)
+if recorded_reason is not None:  # task retry in the same hour: keep the earlier trigger
+    should_retrain, retrain_reason = True, recorded_reason
+elif should_retrain:
     should_retrain, retrain_reason, retrain_run_id = start_retrain(
         retrain_reason,
         RETRAINING_JOB_ID,
