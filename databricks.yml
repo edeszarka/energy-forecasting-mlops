@@ -46,11 +46,7 @@ resources:
           depends_on:
             - task_key: "transform"
           notebook_task:
-            notebook_path: ./notebooks/03_drift_check.py
-            base_parameters:
-              # Sustained drift starts this job directly (fire-and-forget, spec 011);
-              # its weekly schedule stays as a safety net.
-              retraining_job_id: ${resources.jobs.energy_retraining_pipeline.id}
+            notebook_path: ./notebooks/03_drift_check.py  # diagnostic only (spec 018)
           environment_key: "default"
           timeout_seconds: 900
 
@@ -67,6 +63,10 @@ resources:
             - task_key: "predict"
           notebook_task:
             notebook_path: ./notebooks/09_error_monitor.py
+            base_parameters:
+              # Sustained forecast degradation starts this job directly
+              # (fire-and-forget, spec 018); its weekly schedule stays as a safety net.
+              retraining_job_id: ${resources.jobs.energy_retraining_pipeline.id}
           environment_key: "default"
           timeout_seconds: 900
 

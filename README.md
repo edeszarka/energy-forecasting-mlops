@@ -1,6 +1,6 @@
 # Energy Consumption Forecasting — MLOps Pipeline on Databricks
 
-End-to-end forecasting pipeline for Hungarian electricity consumption using live ENTSO-E data, Databricks, Delta Lake, and MLflow. Hourly predictions, drift-triggered retraining (plus a weekly safety-net run), CI/CD via GitHub Actions.
+End-to-end forecasting pipeline for Hungarian electricity consumption using live ENTSO-E data, Databricks, Delta Lake, and MLflow. Hourly predictions, live error monitoring against seasonal naive, error-triggered retraining (plus a weekly safety-net run), CI/CD via GitHub Actions.
 
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![Databricks](https://img.shields.io/badge/Platform-Databricks-orange.svg)](https://www.databricks.com/)
@@ -151,8 +151,8 @@ Since spec 017 ([ADR-0006](docs/adr/0006-live-error-monitoring-and-shadow-scorin
 
 ## MLOps Design
 
-### Drift Detection
-Drift monitoring uses Evidently AI's `DataDriftPreset` in `03_drift_check`. It detects statistical shifts in the target and non-calendar features (calendar columns such as `month` differ between any two windows by construction and are excluded). The reference window is the production run's training window. If drift persists for 3 consecutive hourly checks (a missing hour breaks the streak), `03_drift_check` starts `energy_retraining_pipeline` directly via the Jobs API (fire-and-forget, so hourly forecasts are never blocked), subject to a 24-hour cooldown, and writes a retrain flag that marks the request as pending. `08_promote_model.py` deletes the flag at the end of a successful retrain; a flag older than 6 hours is treated as stale so a failed retrain cannot block future triggers.
+### Drift Diagnostics
+`03_drift_check` runs Evidently AI's `DataDriftPreset` on the target and non-calendar features (calendar columns such as `month` differ between any two windows by construction and are excluded) and stores the result in `drift_control` with an HTML report. **It never starts a retrain** (spec 018, [ADR-0007](docs/adr/0007-error-triggered-retraining.md)): between a 7-day current window and a 30-day reference it flagged drift on every hourly check for 60 days, almost always on every feature at once. That is the season changing, not a model failing. Drift tells you *what* changed; the error monitor decides *whether* it matters.
 
 ### Live Error Monitoring
 `09_error_monitor` runs after `04_predict` (which backfills actuals) and scores three streams over the last 24h, 7d and 30d of target hours: the **served** forecast, **seasonal naive** and the **shadow LightGBM** run. Each model is also compared with naive on exactly the same target hours: `relative_skill = 1 − model MAPE / naive MAPE` (> 0 means it beats naive). MAPE is the mean of `|actual − predicted| / actual`, the same definition as training's naive metric. One row per window and stream goes to `forecast_error_monitor`.
@@ -169,6 +169,13 @@ Alerts, on the 7-day window (thresholds in `src/config.py`, provisional for the 
 | `SHADOW_BEATS_NAIVE` | shadow `relative_skill` ≥ 0.05 on ≥ 120 hours: evidence for a promotion review | no |
 
 A failing alert fails the task **once, when it starts** (it was not active at the previous check), after the rows are written; the hourly job's failure email is the alert channel. It does not fail again while the alert persists. The old LightGBM-only prediction-MAE check in `03_drift_check` is retired; its `drift_control` columns are written empty, and the Streamlit MAE tab shows N/A.
+
+### Error-Triggered Retraining
+`09_error_monitor` also decides whether to retrain (spec 018). The served LightGBM run is judged **only on the target hours it served itself** (gold rows carry its run id as `model_version`), paired with seasonal naive on the same hours, so a freshly promoted run is never blamed for its predecessor's errors. The run is *degraded* when, on at least 72 of its own hours in the 7-day window, it is worse than naive (`relative_skill < 0`) or its MAPE is above 25%. After 24 consecutive degraded hourly checks (a missing hour breaks the streak) it starts `energy_retraining_pipeline` via the Jobs API (fire-and-forget, so hourly forecasts are never blocked), subject to a 72-hour cooldown, and writes a retrain flag that marks the request as pending. `08_promote_model.py` deletes the flag at the end of a successful retrain; a flag older than 6 hours is treated as stale so a failed retrain cannot block future triggers. A failure to start the job is recorded and retried the next hour; it never fails the task. The decision is stored on the served 7-day monitor row (`degraded`, `consecutive_degraded_hours`, `retrain_triggered`, `retrain_reason`).
+
+Why error and not drift: retraining fixes **concept drift**, a change in the relationship between inputs and load (rooftop solar lowering midday net load, a large consumer appearing or leaving). **Data drift** alone, such as autumn cooling, is a shift the model has already seen in two years of history. Concept drift cannot be read from the inputs, only from a larger error once actuals arrive, so the error trigger is the practical concept-drift detector. It also catches inputs moving outside the training range, where a retrain helps as well. Error caused by bad data is stopped earlier by the enforced data-quality checks and the promotion gate, and the failure email asks for a human look. Slow concept drift that never makes the model lose to naive for a full day is absorbed by the weekly retrain ([ADR-0007](docs/adr/0007-error-triggered-retraining.md)).
+
+While seasonal naive serves there is no model to judge, so the Sunday 02:00 UTC run is the only retrain. All thresholds are in `src/config.py` and provisional for the first month.
 
 ### CI/CD
 
@@ -199,13 +206,13 @@ energy-forecasting-mlops/
 │   ├── 00_backfill_bronze.py       # Manual: backfill files → Bronze (replaceWhere, DQ enforced)
 │   ├── 01_ingest.py                # Volume → Bronze (backlog discovery, MERGE INTO)
 │   ├── 02_transform.py             # Bronze → Silver (feature engineering, rebuild mode, dq_mode)
-│   ├── 03_drift_check.py           # Evidently AI drift monitoring
+│   ├── 03_drift_check.py           # Evidently AI drift diagnostics (never triggers, spec 018)
 │   ├── 04_predict.py               # Silver → Gold (production LightGBM or seasonal-naive fallback)
 │   ├── 05_train_prophet.py         # Prophet 24h benchmark training
 │   ├── 06_train_lgbm.py            # LightGBM 24h training
 │   ├── 07_evaluate.py              # Champion/Challenger comparison
 │   ├── 08_promote_model.py         # Tag-based promotion + audit log
-│   └── 09_error_monitor.py         # Live MAPE: served vs naive vs shadow, alerts (spec 017)
+│   └── 09_error_monitor.py         # Live MAPE, alerts (spec 017), retrain trigger (spec 018)
 ├── src/
 │   ├── __init__.py
 │   ├── api_client.py               # ENTSO-E + OpenMeteo HTTP clients
@@ -216,14 +223,15 @@ energy-forecasting-mlops/
 │   ├── dashboard.py                # Streamlit dashboard
 │   ├── data_quality.py             # Load data-quality checks, dq_mode (spec 014)
 │   ├── data_version.py             # Silver data version + run remediation plan (spec 014)
-│   ├── drift.py                    # Drift extraction, MAE, retrain trigger rules (spec 011)
+│   ├── drift.py                    # Drift extraction, streak/cooldown trigger rules (spec 011)
 │   ├── error_monitoring.py         # Live error metrics, paired naive comparison, alerts (spec 017)
+│   ├── error_trigger.py            # Served-run degradation and retrain decision (spec 018)
 │   ├── features.py                 # Feature engineering (18 columns)
 │   ├── forecast_timing.py          # Inference anchor → target timestamp (spec 006)
 │   ├── gold_rows.py                # is_served rows + naive gold history (spec 017)
 │   ├── ingest_discovery.py         # Volume backlog selection (spec 008)
 │   ├── promotion.py                # Champion/challenger comparison (spec 011)
-│   ├── retrain_trigger.py          # Starts the retraining job on drift (spec 011)
+│   ├── retrain_trigger.py          # Starts the retraining job, pending flag (spec 011, 018)
 │   ├── silver_build.py             # Silver build shared by hourly path and rebuild (spec 014)
 │   ├── splits.py                   # Train/val/test + rolling-origin splits
 │   ├── target_construction.py      # Time-aligned horizon target (spec 007)
@@ -285,7 +293,7 @@ databricks bundle deploy --target prod
 
 ### Pipeline Execution
 - **Hourly**: GitHub Actions fetches data → uploads to UC Volumes → triggers Databricks `energy_hourly_pipeline` (ingest → transform → drift_check → predict → error_monitor)
-- **On drift**: `03_drift_check` starts `energy_retraining_pipeline` (train → evaluate → promote) after 3 consecutive hours of drift
+- **On forecast degradation**: `09_error_monitor` starts `energy_retraining_pipeline` (train → evaluate → promote) after 24 consecutive hours in which the served run is worse than naive or above the MAPE ceiling
 - **Weekly**: the same job also runs Sundays 02:00 UTC as a safety net
 
 ## Dashboard
@@ -299,7 +307,7 @@ The `dashboard/energy_forecast.sql` file contains 8 queries for a Databricks SQL
 | Live Forecast Error (7d) | Served vs naive vs shadow MAPE, relative skill, coverage, alerts (spec 017) |
 | Active Forecast Error Alerts | Alerts of the latest monitor check |
 | Seasonal-Naive Accuracy History | Weekly naive MAPE since 2024 (includes the reconstructed history) |
-| Drift Monitoring Heatmap | Drifted features over last 30 days |
+| Drift Monitoring Heatmap | Drifted features over last 30 days (diagnostic; never triggers retraining) |
 | Model Registry Status | Current production models & age |
 | Retraining History Timeline | Promotion audit trail (last 90 days) |
 

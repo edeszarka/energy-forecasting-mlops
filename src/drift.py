@@ -105,32 +105,33 @@ def select_drift_columns(feature_columns: list[str]) -> list[str]:
     return [c for c in feature_columns if c not in DRIFT_EXCLUDED_FEATURES]
 
 
-def count_consecutive_drift_hours(
+def count_consecutive_hours(
     history: list[tuple[TimestampLike, bool]],
     check_time: TimestampLike,
-    current_any_drift: bool,
+    current_active: bool,
 ) -> int:
-    """Counts consecutive HOURLY drift checks ending at `check_time`.
+    """Counts consecutive HOURLY checks with an active signal ending at `check_time`.
 
-    `history` is (check_timestamp, any_drift_detected) pairs from drift_control,
-    in any order. The streak only continues while each earlier check sits exactly
-    one hour before the next one — a missing hour (job outage) breaks it, so
+    `history` is (check_timestamp, signal) pairs — data drift from drift_control,
+    or forecast degradation from forecast_error_monitor (spec 018) — in any
+    order. The streak only continues while each earlier check sits exactly one
+    hour before the next one — a missing hour (job outage) breaks it, so
     "3 consecutive hours" can never span 3 rows spread over days (spec 011 §1.5).
     """
-    if not current_any_drift:
+    if not current_active:
         return 0
 
-    drift_by_hour = {to_naive_utc(ts).floor("h"): bool(flag) for ts, flag in history}
+    active_by_hour = {to_naive_utc(ts).floor("h"): bool(flag) for ts, flag in history}
     count = 1
     expected = to_naive_utc(check_time).floor("h") - pd.Timedelta(hours=1)
-    while drift_by_hour.get(expected):
+    while active_by_hour.get(expected):
         count += 1
         expected -= pd.Timedelta(hours=1)
     return count
 
 
 def decide_retrain(
-    any_drift: bool,
+    active: bool,
     consecutive_hours: int,
     consecutive_hours_threshold: int,
     now: TimestampLike,
@@ -138,21 +139,26 @@ def decide_retrain(
     cooldown_hours: float = 24,
     pending_since: TimestampLike | None = None,
     pending_timeout_hours: float = 6,
+    signal_name: str = "Drift",
 ) -> tuple[bool, str]:
-    """Pure retrain-trigger decision for 03_drift_check.
+    """Pure retrain-trigger decision: streak threshold, cooldown, pending request.
+
+    Since spec 018 the signal is forecast degradation (09_error_monitor); data
+    drift no longer triggers.
 
     A pending request older than `pending_timeout_hours` is treated as stale
     (the retrain it asked for failed or never ran) and no longer blocks a new
     trigger — otherwise one failed retrain would disable triggering forever
     (spec 011 §1.2).
     """
-    if not any_drift:
-        return False, "No drift detected."
+    if not active:
+        return False, f"No {signal_name.lower()} detected."
 
     if consecutive_hours < consecutive_hours_threshold:
         return (
             False,
-            f"Drift detected for {consecutive_hours}h (threshold: {consecutive_hours_threshold}h).",
+            f"{signal_name} detected for {consecutive_hours}h "
+            f"(threshold: {consecutive_hours_threshold}h).",
         )
 
     now = to_naive_utc(now)
@@ -166,4 +172,4 @@ def decide_retrain(
         if pending_hours < pending_timeout_hours:
             return False, f"Retrain already pending ({pending_hours:.1f}h old)."
 
-    return True, f"Drift detected for {consecutive_hours} consecutive hours."
+    return True, f"{signal_name} detected for {consecutive_hours} consecutive hours."
