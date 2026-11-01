@@ -1,6 +1,6 @@
 # ADR-0007: Retraining is triggered by forecast error; data drift is diagnostic only
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-01
 - **Deciders:** Ede Szarka
 - **Implemented by:** spec 018

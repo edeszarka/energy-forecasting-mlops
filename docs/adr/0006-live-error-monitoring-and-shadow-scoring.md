@@ -1,6 +1,6 @@
 # ADR-0006: Live error monitoring against naive, with shadow scoring
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-01
 - **Deciders:** Ede Szarka
 - **Implemented by:** spec 017

@@ -1,6 +1,6 @@
 # ADR-0002: Prophet becomes a benchmark only; seasonal naive is the serving fallback
 
-- **Status:** Accepted
+- **Status:** Accepted; the Prophet decision is superseded by ADR-0008 (Prophet removed)
 - **Date:** 2026-10-24
 - **Deciders:** Ede Szarka
 - **Implemented by:** spec 013 (BL-20)
