@@ -59,13 +59,20 @@ from pyspark.sql.types import (
 )
 
 from src.baseline import seasonal_naive_forecast
-from src.config import CATALOG, CURRENT_DATA_VERSION, MODEL_INPUT_FEATURES, PATHS
+from src.config import (
+    CATALOG,
+    CURRENT_DATA_VERSION,
+    MODEL_INPUT_FEATURES,
+    NAIVE_MODEL_NAME,
+    PATHS,
+)
 from src.forecast_timing import (
     SERVED_MODEL,
     resolve_target_timestamp,
     serving_anchor_timestamps,
     serving_target_timestamps,
 )
+from src.gold_rows import NAIVE_MODEL_VERSION, combine_gold_rows
 from src.promotion import pick_production_run
 
 # COMMAND ----------
@@ -76,8 +83,6 @@ from src.promotion import pick_production_run
 dbutils.widgets.text("force_backfill", "false")
 
 HORIZON_HOURS = 24  # ADR-0001: 24h only
-NAIVE_MODEL_NAME = "seasonal_naive"
-NAIVE_MODEL_VERSION = "seasonal_naive_t-168h"
 
 try:
     pipeline_run_id = (
@@ -158,6 +163,34 @@ def load_production_model(model_name: str, mlflow_client: MlflowClient):
     mape_str = f"{mape:.4f}" if mape is not None else "n/a"
     logger.info(f"Loaded {model_name} from Run ID {run_id} (MAPE: {mape_str})")
     return model, "run_latest", run_id
+
+
+def load_shadow_model(model_name: str, mlflow_client: MlflowClient):
+    """
+    Loads the latest current-data-version run of `model_name` for shadow scoring
+    (spec 017 T2): its forecasts are written to gold with is_served = false and
+    are never served. Used only while no production run exists.
+
+    Raises:
+        ModelNotFoundError: If no run of the current data version exists.
+    """
+    exp_ids = [e.experiment_id for e in mlflow_client.search_experiments()]
+    runs = mlflow_client.search_runs(
+        experiment_ids=exp_ids,
+        filter_string=(
+            f"tags.model_name = '{model_name}' AND tags.leak_affected = 'false' "
+            f"AND tags.data_version = '{CURRENT_DATA_VERSION}'"
+        ),
+        order_by=["attributes.start_time DESC"],
+        max_results=1,
+    )
+    if not runs:
+        raise ModelNotFoundError(f"No data-version-{CURRENT_DATA_VERSION} run for {model_name}.")
+
+    run_id = runs[0].info.run_id
+    model = mlflow.lightgbm.load_model(f"runs:/{run_id}/model")
+    logger.info(f"Shadow scoring {model_name} from Run ID {run_id}")
+    return model, run_id, run_id
 
 
 # COMMAND ----------
@@ -347,6 +380,29 @@ def generate_naive_forecasts(
     return pd.DataFrame(output_rows)
 
 
+def lgbm_forecasts(
+    model_loader,
+    history_pd: pd.DataFrame,
+    mlflow_client: MlflowClient,
+    horizon_hours: int,
+    forecast_run_at: datetime,
+    config: dict,
+) -> pd.DataFrame:
+    """LightGBM rows from the run `model_loader` picks (production or shadow)."""
+    model, model_version, run_id = model_loader(SERVED_MODEL, mlflow_client)
+    feats = prepare_inference_features(history_pd, horizon_hours, forecast_run_at)
+    return generate_forecasts(
+        model=model,
+        model_name=SERVED_MODEL,
+        model_version=model_version,
+        run_id=run_id,
+        features_df=feats,
+        horizon_hours=horizon_hours,
+        forecast_run_at=forecast_run_at,
+        config=config,
+    )
+
+
 def serve_forecasts(
     history_pd: pd.DataFrame,
     mlflow_client: MlflowClient,
@@ -356,32 +412,43 @@ def serve_forecasts(
 ) -> tuple[pd.DataFrame, str]:
     """Production LightGBM forecasts, or seasonal naive if any model-side step fails.
 
-    Returns (forecasts_df, serving_mode). Both paths write the same target hours
-    (serving_target_timestamps). Errors that also break the naive path (no usable
-    silver history) still raise.
+    Returns (forecasts_df, serving_mode). Seasonal-naive rows are written every
+    hour (spec 017 T2); `is_served` marks the served rows. While naive serves, the
+    latest current-data-version LightGBM run is scored in shadow; a shadow failure
+    only logs. All rows use the same target hours (serving_target_timestamps).
+    Errors that break the naive path while naive serves (no usable silver
+    history) still raise.
     """
+    targets = serving_target_timestamps(forecast_run_at, horizon_hours)
+    naive_error = None
     try:
-        model, ver, run_id = load_production_model(SERVED_MODEL, mlflow_client)
-        feats = prepare_inference_features(history_pd, horizon_hours, forecast_run_at)
-        forecasts_df = generate_forecasts(
-            model=model,
-            model_name=SERVED_MODEL,
-            model_version=ver,
-            run_id=run_id,
-            features_df=feats,
-            horizon_hours=horizon_hours,
-            forecast_run_at=forecast_run_at,
-            config=config,
+        naive_df = generate_naive_forecasts(
+            history_pd, targets, horizon_hours, forecast_run_at, config
         )
-        return forecasts_df, SERVED_MODEL
+    except ValueError as e:
+        naive_error, naive_df = e, pd.DataFrame()
+
+    try:
+        model_df = lgbm_forecasts(
+            load_production_model, history_pd, mlflow_client, horizon_hours, forecast_run_at, config
+        )
+        if naive_error is not None:
+            logger.warning(f"No seasonal-naive rows this hour: {naive_error}")
+        return combine_gold_rows(naive_df, model_df, model_served=True), SERVED_MODEL
     except Exception as e:
         logger.warning(f"Serving seasonal naive instead of {SERVED_MODEL}: {type(e).__name__}: {e}")
 
-    targets = serving_target_timestamps(forecast_run_at, horizon_hours)
-    forecasts_df = generate_naive_forecasts(
-        history_pd, targets, horizon_hours, forecast_run_at, config
-    )
-    return forecasts_df, NAIVE_MODEL_NAME
+    if naive_error is not None:
+        raise naive_error
+
+    try:
+        shadow_df = lgbm_forecasts(
+            load_shadow_model, history_pd, mlflow_client, horizon_hours, forecast_run_at, config
+        )
+    except Exception as e:
+        logger.warning(f"Shadow scoring skipped: {type(e).__name__}: {e}")
+        shadow_df = pd.DataFrame()
+    return combine_gold_rows(naive_df, shadow_df, model_served=False), NAIVE_MODEL_NAME
 
 
 # COMMAND ----------
@@ -405,6 +472,7 @@ def write_forecasts(forecasts_df: pd.DataFrame, spark, config: dict, is_backfill
             StructField("is_backfilled", BooleanType(), False),
             StructField("pipeline_run_id", StringType(), False),
             StructField("created_at", TimestampType(), False),
+            StructField("is_served", BooleanType(), True),  # spec 017; NULL before it
         ]
     )
 
@@ -412,6 +480,8 @@ def write_forecasts(forecasts_df: pd.DataFrame, spark, config: dict, is_backfill
         spark.createDataFrame([], schema).write.format("delta").saveAsTable(
             config["forecast_table"]
         )
+    elif "is_served" not in spark.table(config["forecast_table"]).columns:
+        spark.sql(f"ALTER TABLE {config['forecast_table']} ADD COLUMNS (is_served BOOLEAN)")
 
     sdf = spark.createDataFrame(forecasts_df, schema)
     target = DeltaTable.forName(spark, config["forecast_table"])
