@@ -1,4 +1,4 @@
-"""Gold forecast rows: which row was served, and the seasonal-naive history (spec 017)."""
+"""Gold forecast rows (spec 017, 019b) and the seasonal-naive history."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from src.config import NAIVE_MODEL_NAME
 from src.promotion import to_naive_utc
 
 NAIVE_MODEL_VERSION = "seasonal_naive_t-168h"
+# Served only when T - 168h is missing (spec 019b D8); name in src/config.py.
+DAILY_NAIVE_MODEL_VERSION = "daily_naive_t-48h"
 NAIVE_LAG_HOURS = 168
 
 
@@ -21,25 +23,64 @@ def gold_forecast_id(model_name: str, horizon_hours: int, target_ts: pd.Timestam
     return hashlib.md5(f"{model_name}_{horizon_hours}_{target_ts.isoformat()}".encode()).hexdigest()
 
 
-def combine_gold_rows(
-    naive_df: pd.DataFrame, model_df: pd.DataFrame, model_served: bool
-) -> pd.DataFrame:
-    """Rows for one serving run with `is_served` set (ADR-0006).
+# Gold columns in table order (spec 006, 017, 019b).
+GOLD_COLUMNS = [
+    "forecast_id",
+    "timestamp",
+    "forecast_run_at",
+    "model_name",
+    "model_version",
+    "horizon_hours",
+    "predicted_mwh",
+    "actual_mwh",
+    "is_backfilled",
+    "pipeline_run_id",
+    "created_at",
+    "is_served",
+    "issued_at",
+    "is_catch_up",
+    "fallback_reason",
+]
 
-    `model_df` holds LightGBM rows: the production run's (`model_served=True`) or
-    the shadow run's (`model_served=False`). Naive rows are always written and are
-    the served ones exactly when the model is not.
+
+def gold_row(
+    *,
+    model_name: str,
+    model_version: str,
+    target: pd.Timestamp,
+    issued_at: pd.Timestamp,
+    is_catch_up: bool,
+    predicted_mwh: float,
+    is_served: bool,
+    forecast_run_at: Any,
+    pipeline_run_id: str,
+    created_at: datetime,
+    fallback_reason: str | None = None,
+    horizon_hours: int = 24,
+) -> dict[str, Any]:
+    """One gold row (spec 019b B1/B2).
+
+    `issued_at` is the nominal issuance hour τ' (target − 24h); `created_at` is
+    the actual write time (D5); `forecast_run_at` is the hour of the run that
+    wrote it. `fallback_reason` is set only on a served naive row.
     """
-    if model_served and model_df.empty:
-        raise ValueError("model_served=True requires model rows.")
-    frames = [
-        df.assign(is_served=served)
-        for df, served in ((model_df, model_served), (naive_df, not model_served))
-        if not df.empty
-    ]
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    return {
+        "forecast_id": gold_forecast_id(model_name, horizon_hours, target),
+        "timestamp": target,
+        "forecast_run_at": forecast_run_at,
+        "model_name": model_name,
+        "model_version": str(model_version),
+        "horizon_hours": horizon_hours,
+        "predicted_mwh": float(predicted_mwh),
+        "actual_mwh": None,
+        "is_backfilled": False,
+        "pipeline_run_id": pipeline_run_id,
+        "created_at": created_at,
+        "is_served": is_served,
+        "issued_at": issued_at,
+        "is_catch_up": is_catch_up,
+        "fallback_reason": fallback_reason,
+    }
 
 
 def reconstruct_naive_gold(
@@ -81,5 +122,9 @@ def reconstruct_naive_gold(
             "pipeline_run_id": pipeline_run_id,
             "created_at": created_at,
             "is_served": None,
+            # Legacy history (spec 019b D7): no nominal issuance, never served.
+            "issued_at": None,
+            "is_catch_up": None,
+            "fallback_reason": None,
         }
     )
