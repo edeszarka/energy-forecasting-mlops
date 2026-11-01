@@ -33,6 +33,13 @@ OPENMETEO_HISTORICAL_FORECAST_URL: Final[str] = (
     "https://historical-forecast-api.open-meteo.com/v1/forecast"
 )
 
+# As-issued weather forecasts for the 24h model (spec 019, ADR-0008): the
+# `*_previous_day2` variables are the forecast for each hour from the latest run
+# initialised >= 48h before it, so they were published before any issuance 24h
+# ahead. One fixed model keeps training and serving on the same source.
+OPENMETEO_PREVIOUS_RUNS_URL: Final[str] = "https://previous-runs-api.open-meteo.com/v1/forecast"
+OPENMETEO_FORECAST_MODEL: Final[str] = "icon_seamless"
+
 HTTP_TIMEOUT_SECONDS: Final[int] = 30
 HTTP_MAX_RETRIES: Final[int] = 3
 HTTP_BACKOFF_FACTOR: Final[int] = 2
@@ -61,6 +68,7 @@ class DataPaths:
     table_eval: str = f"{CATALOG}.{SCHEMA}.model_evaluation"
     table_promotion: str = f"{CATALOG}.{SCHEMA}.promotion_log"
     table_error_monitor: str = f"{CATALOG}.{SCHEMA}.forecast_error_monitor"
+    table_weather_forecast: str = f"{CATALOG}.{SCHEMA}.bronze_weather_forecast"  # spec 019
     table_ingestion_log: str = f"{CATALOG}.{SCHEMA}.ingestion_log"
 
     # Volume paths for files/artifacts
@@ -72,6 +80,10 @@ class DataPaths:
     volume_backfill_load: str = f"{VOLUME_PATH}/raw_backfill/load"
     volume_backfill_temp: str = f"{VOLUME_PATH}/raw_backfill/temperature"
     volume_backfill_archive: str = f"{VOLUME_PATH}/raw_backfill/archive"
+    # As-issued weather forecasts (spec 019): hourly fetches and the backfill.
+    volume_raw_weather_forecast: str = f"{VOLUME_PATH}/raw_ingestion/weather_forecast"
+    volume_archive_weather_forecast: str = f"{VOLUME_PATH}/raw_ingestion/archive/weather_forecast"
+    volume_backfill_weather_forecast: str = f"{VOLUME_PATH}/raw_backfill/weather_forecast"
     volume_reports: str = f"{VOLUME_PATH}/reports"
     volume_flags: str = f"{VOLUME_PATH}/flags"
 
@@ -91,13 +103,23 @@ MLFLOW_PROD_ALIAS: Final[str] = "Production"
 # MODEL ROLES (ADR-0002): only PROMOTABLE_MODELS can be production-tagged and
 # served; BENCHMARK_MODELS are trained and evaluated for reporting only.
 PROMOTABLE_MODELS: Final[tuple[str, ...]] = ("energy_lgbm_24h",)
-BENCHMARK_MODELS: Final[tuple[str, ...]] = ("energy_prophet_24h",)
+# Prophet was removed in spec 019 (ADR-0008): it trained on silver features with
+# imputed future weather. The naive baselines, scored on the same rows, are the benchmark.
+BENCHMARK_MODELS: Final[tuple[str, ...]] = ()
 EVALUATED_MODELS: Final[tuple[str, ...]] = PROMOTABLE_MODELS + BENCHMARK_MODELS
 
 # DATA VERSIONING (ADR-0003): runs tag the silver `pipeline.data_version` they
 # read; serving, evaluation, promotion and the drift reference only consider
 # runs tagged with CURRENT_DATA_VERSION.
 CURRENT_DATA_VERSION: Final[str] = "2"
+
+# FEATURE SET (ADR-0008, spec 019): runs tag the point-in-time feature set they
+# were trained on (src/pit_features.py). Every MLflow reader that picks a run to
+# serve, shadow, compare or promote filters on both tags.
+FEATURE_SET: Final[str] = "pit_24h_v1"
+CURRENT_RUN_FILTER: Final[str] = (
+    f"tags.data_version = '{CURRENT_DATA_VERSION}' AND tags.feature_set = '{FEATURE_SET}'"
+)
 
 # FEATURE ENGINEERING CONSTANTS
 LAG_HOURS: Final[list[int]] = [24, 48, 168]  # t-24h, t-48h, t-168h
@@ -106,7 +128,9 @@ ROLLING_WINDOW_DAYS: Final[int] = 7
 # Single source of truth for model input columns
 # Used by: 06_train_lgbm.py, 04_predict.py, 03_drift_check.py
 # If you add a feature here, update src/features.py:get_feature_columns() too
-MODEL_INPUT_FEATURES: Final[list[str]] = [
+# Silver columns tested for data drift (diagnostic only, spec 018). The model's
+# inputs are src/pit_features.FEATURES (spec 019).
+DRIFT_FEATURE_COLUMNS: Final[list[str]] = [
     "temperature_c",
     "lag_24h",
     "lag_48h",

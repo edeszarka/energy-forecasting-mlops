@@ -1,6 +1,6 @@
 # ADR-0004: Data-quality checks fail the pipeline instead of warning
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-24
 - **Deciders:** Ede Szarka
 - **Implemented by:** spec 013 (T4, resolution), spec 014 (T5)

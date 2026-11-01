@@ -76,7 +76,6 @@ print("version:", __import__("evidently").__version__)
 # forecast error and the retrain trigger live in 09_error_monitor.
 # **Inputs:** `workspace.energy_forecasting.silver_features`
 # **Outputs:** `workspace.energy_forecasting.drift_control`, HTML reports in Volumes.
-# **Last Updated:** 2024-05-21
 #
 # **Required:** evidently>=0.4.33, mlflow>=2.12.0
 
@@ -112,8 +111,8 @@ if root_path not in sys.path:
     sys.path.append(root_path)
 
 from src.config import (
-    CURRENT_DATA_VERSION,
-    MODEL_INPUT_FEATURES,
+    CURRENT_RUN_FILTER,
+    DRIFT_FEATURE_COLUMNS,
     PATHS,
     SCHEMA,
 )
@@ -138,9 +137,9 @@ CONFIG = {
     "current_window_days": int(dbutils.widgets.get("current_window_days")),
     "min_rows_for_drift": int(dbutils.widgets.get("min_rows_for_drift")),
     "primary_model_name": "energy_lgbm_24h",
-    "feature_columns": MODEL_INPUT_FEATURES,  # sourced from src/config.py
+    "feature_columns": DRIFT_FEATURE_COLUMNS,  # sourced from src/config.py
     # Calendar features are excluded from the drift test (spec 011 §1.4)
-    "drift_columns": select_drift_columns(MODEL_INPUT_FEATURES),
+    "drift_columns": select_drift_columns(DRIFT_FEATURE_COLUMNS),
     "target_column": "value_mwh",
 }
 
@@ -194,7 +193,7 @@ def get_reference_window(
             filter_string=(
                 f"tags.model_name = '{config['primary_model_name']}' "
                 "AND tags.production = 'true' AND tags.leak_affected = 'false' "
-                f"AND tags.data_version = '{CURRENT_DATA_VERSION}'"
+                f"AND {CURRENT_RUN_FILTER}"
             ),
             max_results=50,
         )

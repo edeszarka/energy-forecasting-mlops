@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.config import MIN_TRAINING_ROWS, MODEL_INPUT_FEATURES
+from src.config import DRIFT_FEATURE_COLUMNS, MIN_TRAINING_ROWS
 from src.features import (
     add_calendar_features,
     add_lag_features,
@@ -270,5 +270,30 @@ def test_model_input_includes_humidity_and_cloud_cover():
     Passes once both are added — tests the cross-file contract between feature generation
     and model consumption.
     """
-    missing = [c for c in ["humidity_pct", "cloud_cover_pct"] if c not in MODEL_INPUT_FEATURES]
+    missing = [c for c in ["humidity_pct", "cloud_cover_pct"] if c not in DRIFT_FEATURE_COLUMNS]
     assert not missing, f"Model input feature list missing columns: {missing}"
+
+
+def test_weather_gap_is_filled_only_from_earlier_hours():
+    """Spec 019 (BUG-01): no backward fill, no centred window."""
+    from src.features import _fill_missing_weather
+
+    ts = pd.date_range("2025-01-01", periods=12, freq="h", tz="UTC")
+    base = pd.DataFrame(
+        {
+            "timestamp": ts,
+            "temperature_c": [1.0, 2.0, 3.0] + [np.nan] * 5 + [9.0, 9.0, 9.0, 9.0],
+            "humidity_pct": 50.0,
+            "cloud_cover_pct": 50.0,
+        }
+    )
+    later = base.copy()
+    later.loc[8:, "temperature_c"] = 100.0  # change everything after the gap
+
+    filled, filled_later = _fill_missing_weather(base), _fill_missing_weather(later)
+
+    assert (
+        filled["temperature_c"].iloc[:8].tolist() == filled_later["temperature_c"].iloc[:8].tolist()
+    )
+    assert filled["temperature_c"].iloc[3:6].tolist() == [3.0, 3.0, 3.0]  # ffill, 3h
+    assert filled["temperature_c"].iloc[6] == pytest.approx(np.mean([1.0, 2.0, 3.0, 3.0, 3.0, 3.0]))

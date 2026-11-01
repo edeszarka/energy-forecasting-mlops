@@ -23,7 +23,7 @@ BENCHMARK_ONLY_REASON: str = "Benchmark-only model (ADR-0002) — never promoted
 
 # Minimum number of shared out-of-sample rows needed for a same-window
 # comparison. Prophet's rolling-origin backtest only has n_folds targets.
-MIN_COMMON_ROWS: dict[str, int] = {"lgbm": 24, "prophet": 3}
+MIN_COMMON_ROWS: dict[str, int] = {"lgbm": 24}
 
 
 def calculate_mape(actual: pd.Series, predicted: pd.Series) -> float:

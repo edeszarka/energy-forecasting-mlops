@@ -1,6 +1,6 @@
 # ADR-0003: Version the training data and serve only models trained on the current version
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-24
 - **Deciders:** Ede Szarka
 - **Implemented by:** spec 014 (T6, T8)

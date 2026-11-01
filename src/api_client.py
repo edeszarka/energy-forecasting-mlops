@@ -350,12 +350,11 @@ class OpenMeteoClient:
         return df
 
     def _fallback_weather(self, df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
-        """Fills NaN weather metrics with a 72-hour rolling mean."""
+        """Fills NaN weather metrics with the trailing 72-hour mean (never later hours)."""
         logger.warning("Detected NaNs in weather data. Applying rolling mean imputation.")
         df["is_weather_imputed"] = df[columns].isna().any(axis=1)
         for col in columns:
-            # 72-hour rolling window, minimum 1 period to fill as much as possible
-            df[col] = df[col].fillna(df[col].rolling(window=72, min_periods=1, center=True).mean())
+            df[col] = df[col].fillna(df[col].rolling(window=72, min_periods=1).mean())
         return df
 
 

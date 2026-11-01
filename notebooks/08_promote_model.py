@@ -29,7 +29,6 @@ if root_path not in sys.path:
 # **Outputs:**
 # - MLflow Model Registry stage transitions
 # - `workspace.energy_forecasting.promotion_log` (Audit trail)
-# **Last Updated:** 2024-05-21
 #
 # **Required:** mlflow>=2.12.0, pandas, pyspark
 
@@ -55,7 +54,7 @@ from pyspark.sql.types import (
 )
 from pyspark.sql.window import Window
 
-from src.config import CATALOG, CURRENT_DATA_VERSION, PATHS, RETRAIN_FLAG_PATH
+from src.config import CATALOG, CURRENT_RUN_FILTER, PATHS, RETRAIN_FLAG_PATH
 from src.promotion import BENCHMARK_ONLY_REASON, is_promotable, pick_production_run
 
 # COMMAND ----------
@@ -132,7 +131,7 @@ def get_production_runs(model_name: str, mlflow_client: MlflowClient) -> list:
         filter_string=(
             f"tags.model_name = '{model_name}' AND tags.production = 'true' "
             "AND tags.leak_affected = 'false' "
-            f"AND tags.data_version = '{CURRENT_DATA_VERSION}'"
+            f"AND {CURRENT_RUN_FILTER}"
         ),
         max_results=50,
     )

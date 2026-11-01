@@ -199,12 +199,10 @@ def _fill_missing_weather(df: pd.DataFrame) -> pd.DataFrame:
     for col in weather_cols:
         if col not in df.columns:
             continue
-        # Step 1: Forward-fill short gaps (up to 3h)
+        # Only earlier hours fill a gap (spec 019): forward-fill up to 3h, then
+        # the trailing 72h mean. No backward fill, no centred window.
         df[col] = df[col].ffill(limit=3)
-        # Step 2: Backward-fill short gaps (up to 3h)
-        df[col] = df[col].bfill(limit=3)
-        # Step 3: 72h rolling mean for remaining NaN
-        df[col] = df[col].fillna(df[col].rolling(window=72, min_periods=1, center=True).mean())
+        df[col] = df[col].fillna(df[col].rolling(window=72, min_periods=1).mean())
 
     # Update is_weather_imputed flag
     if "is_weather_imputed" not in df.columns:

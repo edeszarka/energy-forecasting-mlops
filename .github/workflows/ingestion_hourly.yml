@@ -230,6 +230,14 @@ jobs:
               sys.exit(1)
           EOF
 
+      - name: Fetch as-issued weather forecasts
+        # Spec 019: forecasts for the 24h model. A failed fetch only warns: each
+        # target hour is covered by the fetches of the previous two days.
+        shell: bash
+        run: |
+          python -m src.weather_forecast --days-back 3 --days-ahead 2 --out /tmp/weather_forecast \
+            || echo "::warning::Weather forecast fetch failed; earlier fetches still cover the next 24h."
+
       - name: Ensure Volume directories exist
         shell: bash
         run: |
@@ -245,6 +253,9 @@ jobs:
             2>/dev/null || true
           databricks fs mkdirs \
             "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/archive/temperature" \
+            2>/dev/null || true
+          databricks fs mkdirs \
+            "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/weather_forecast" \
             2>/dev/null || true
           echo "Volume directories ready."
 
@@ -276,7 +287,17 @@ jobs:
             echo "Uploaded temp: $filename"
           done
           
-          echo "Upload complete: $LOAD_COUNT load files, $TEMP_COUNT temperature files."
+          FORECAST_COUNT=0
+          for f in /tmp/weather_forecast/*.json; do
+            [ -e "$f" ] || continue
+            databricks fs cp \
+              "$f" \
+              "dbfs:/Volumes/workspace/energy_forecasting/data/raw_ingestion/weather_forecast/$(basename "$f")" \
+              --overwrite
+            FORECAST_COUNT=$((FORECAST_COUNT + 1))
+          done
+
+          echo "Upload complete: $LOAD_COUNT load files, $TEMP_COUNT temperature files, $FORECAST_COUNT weather forecast files."
           
           if [ "$LOAD_COUNT" -eq 0 ]; then
             echo "::warning::No load files were uploaded. Check the fetch step."

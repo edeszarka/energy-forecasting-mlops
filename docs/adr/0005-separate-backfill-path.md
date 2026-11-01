@@ -1,6 +1,6 @@
 # ADR-0005: A separate backfill path for historical data
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-24
 - **Deciders:** Ede Szarka
 - **Implemented by:** spec 014 (T3)
