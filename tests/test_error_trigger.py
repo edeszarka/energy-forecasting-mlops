@@ -261,3 +261,81 @@ def test_ac5_without_job_id_only_the_flag_is_written():
 
     assert (triggered, run_id) == (True, None)
     assert flags == ["why"]
+
+
+def test_d8_daily_naive_hours_do_not_hide_the_served_run():
+    gold = _concat(
+        _gold("energy_lgbm_24h", "run", 100, 150.0, 100.0, True, end=END - pd.Timedelta(hours=5)),
+        _gold("daily_naive", "daily_naive_t-48h", 5, 100.0, 100.0, True),
+        _naive(),
+    )
+
+    assert current_served_run(gold) == ("energy_lgbm_24h", "run")
+    d = assess_degradation(gold, END, 168, T)
+    assert d.run_id == "run" and d.n_hours == 100 and d.degraded is True
+
+
+# ───────────── spec 019b: the trigger's skill is the served_model skill ─────────────
+
+
+def _mixed(lgbm_pred, naive_served_pred):
+    """100h served by LightGBM run "run" (seasonal naive 10% off on the same hours, unserved),
+    then 40h served by seasonal naive and 28h by daily naive at `naive_served_pred`."""
+    lgbm_end = END - pd.Timedelta(hours=68)
+    return _concat(
+        _gold("energy_lgbm_24h", "run", 100, lgbm_pred, 100.0, True, end=lgbm_end),
+        _gold("seasonal_naive", "seasonal_naive_t-168h", 100, 110.0, 100.0, False, end=lgbm_end),
+        _gold(
+            "seasonal_naive",
+            "seasonal_naive_t-168h",
+            40,
+            naive_served_pred,
+            100.0,
+            True,
+            end=END - pd.Timedelta(hours=28),
+        ),
+        _gold("daily_naive", "daily_naive_t-48h", 28, naive_served_pred, 100.0, True),
+    )
+
+
+def _monitor_rows(gold):
+    from src.error_monitoring import MODEL_STREAM, SERVED_STREAM, build_monitor_rows
+
+    rows, _ = build_monitor_rows(gold, END, windows=(168,), alert_window=168)
+    by_stream = {r["stream"]: r for r in rows}
+    return by_stream[MODEL_STREAM], by_stream[SERVED_STREAM]
+
+
+def test_trigger_fires_on_the_served_model_skill():
+    gold = _mixed(
+        lgbm_pred=115.0, naive_served_pred=100.0
+    )  # model loses to naive; naive hours perfect
+
+    model_row, served_row = _monitor_rows(gold)
+    degradation = assess_degradation(gold, END, 168, T)
+
+    assert (
+        degradation.relative_skill
+        == pytest.approx(model_row["relative_skill"])
+        == pytest.approx(-0.5)
+    )
+    assert served_row["relative_skill"] is None  # the served stream carries no skill
+    assert degradation.degraded is True
+    _, should, _ = decide_error_retrain(degradation, _history(23), END, thresholds=T)
+    assert should is True
+
+
+def test_trigger_ignores_bad_naive_served_hours_when_the_model_beats_naive():
+    gold = _mixed(lgbm_pred=102.0, naive_served_pred=160.0)  # model good; naive hours terrible
+
+    model_row, _ = _monitor_rows(gold)
+    degradation = assess_degradation(gold, END, 168, T)
+
+    assert (
+        degradation.relative_skill
+        == pytest.approx(model_row["relative_skill"])
+        == pytest.approx(0.8)
+    )
+    assert degradation.degraded is False
+    _, should, _ = decide_error_retrain(degradation, _history(23), END, thresholds=T)
+    assert should is False

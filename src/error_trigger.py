@@ -22,6 +22,7 @@ from src.config import (
     ERROR_RETRAIN_MIN_HOURS,
     ERROR_RETRAIN_STREAK_HOURS,
     NAIVE_MODEL_NAME,
+    NAIVE_MODEL_NAMES,
     RETRAIN_PENDING_TIMEOUT_HOURS,
 )
 from src.drift import count_consecutive_hours, decide_retrain
@@ -62,11 +63,16 @@ def _live_served(gold: pd.DataFrame) -> pd.DataFrame:
 
 
 def current_served_run(gold: pd.DataFrame) -> tuple[str, str] | None:
-    """(model_name, model_version) of the most recent served target hour."""
+    """(model_name, model_version) of the most recent target hour a model served.
+
+    Hours served by a naive fallback (seasonal or daily, spec 019b D8) are
+    skipped: they do not identify the model. None if no model served.
+    """
     served = _live_served(gold)
-    if served.empty:
+    models = served[~served["model_name"].isin(NAIVE_MODEL_NAMES)]
+    if models.empty:
         return None
-    latest = served.assign(_ts=[to_naive_utc(t) for t in served["timestamp"]]).sort_values("_ts")
+    latest = models.assign(_ts=[to_naive_utc(t) for t in models["timestamp"]]).sort_values("_ts")
     return str(latest["model_name"].iloc[-1]), str(latest["model_version"].iloc[-1])
 
 
@@ -82,12 +88,12 @@ def assess_degradation(
     window, it is worse than naive on the same hours (skill < `max_skill`) or
     its MAPE is above the ceiling. Never degraded while naive serves.
     """
+    if _live_served(gold).empty:
+        return Degradation(False, "No served forecasts in gold.")
     current = current_served_run(gold)
     if current is None:
-        return Degradation(False, "No served forecasts in gold.")
-    model_name, run_id = current
-    if model_name == NAIVE_MODEL_NAME:
         return Degradation(False, "Seasonal naive serves: no model to judge.")
+    _, run_id = current
     if run_id == LEGACY_MODEL_VERSION:
         return Degradation(False, "Served rows carry no run id (written before spec 018).")
 
