@@ -75,6 +75,7 @@ def _functions(relative_path: str, *names: str, **namespace) -> dict:
         "SparkSession": object,
         "pick_production_run": pick_production_run,
         "CURRENT_DATA_VERSION": "2",
+        "CURRENT_RUN_FILTER": "tags.data_version = '2' AND tags.feature_set = 'pit_24h_v1'",
         **namespace,
     }
     exec(compile(tree, str(path), "exec"), namespace)
@@ -91,6 +92,7 @@ NEW_PROD = make_run(
     production="true",
     promoted_at="2026-10-01T00:00:00+00:00",
     data_version="2",
+    feature_set="pit_24h_v1",
     training_data_start="2026-09-01T00:00:00",
     training_data_end="2026-09-30T00:00:00",
 )
@@ -112,11 +114,11 @@ def test_table_properties_from_show_tblproperties_rows():
     assert read_data_version(table_properties(rows)) == "2"
 
 
-def test_training_notebooks_tag_data_version():
-    for notebook in ("notebooks/05_train_prophet.py", "notebooks/06_train_lgbm.py"):
-        source = (ROOT / notebook).read_text(encoding="utf-8")
-        assert 'mlflow.set_tag("data_version", CONFIG["data_version"])' in source
-        assert "SHOW TBLPROPERTIES" in source
+def test_training_notebook_tags_data_version_and_feature_set():
+    source = (ROOT / "notebooks/06_train_lgbm.py").read_text(encoding="utf-8")
+    assert '"data_version": data_version,' in source
+    assert '"feature_set": FEATURE_SET,' in source
+    assert "SHOW TBLPROPERTIES" in source
 
 
 # --- AC7: readers ignore runs without data_version='2' ---------------------------
@@ -140,6 +142,29 @@ def test_04_loader_ignores_pre_014_production_run():
 
     assert run_id == "new"
     assert model == "runs:/new/model"
+
+
+def test_04_loader_ignores_a_version_2_run_of_the_old_feature_set():
+    # Spec 019: a data-version-2 run trained on the pre-019 (leaky) features.
+    old_features = make_run(
+        "old-features",
+        start_ms=3_000,
+        production="true",
+        promoted_at="2026-10-30T00:00:00+00:00",
+        data_version="2",
+    )
+    client = _FilteringMlflowClient([old_features, NEW_PROD])
+    mlflow = SimpleNamespace(lightgbm=SimpleNamespace(load_model=lambda uri: uri))
+    load = _functions(
+        "notebooks/04_predict.py",
+        "load_production_model",
+        mlflow=mlflow,
+        ModelNotFoundError=_ModelNotFound,
+    )["load_production_model"]
+
+    _, _, run_id = load("energy_lgbm_24h", client)
+
+    assert run_id == "new"
 
 
 def test_04_loader_finds_nothing_when_only_pre_014_runs_exist():
@@ -171,7 +196,7 @@ def _evaluate_functions(client):
 
 def test_07_challenger_ignores_newer_pre_014_run():
     old_latest = make_run("old-latest", start_ms=9_000)
-    new = make_run("new-run", start_ms=1_000, data_version="2")
+    new = make_run("new-run", start_ms=1_000, data_version="2", feature_set="pit_24h_v1")
     fns = _evaluate_functions(_FilteringMlflowClient([old_latest, new]))
 
     assert fns["get_challenger_run"]("energy_lgbm_24h").info.run_id == "new-run"

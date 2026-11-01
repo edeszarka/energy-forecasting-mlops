@@ -118,7 +118,7 @@ def _metrics(scored: pd.DataFrame, window_hours: int) -> WindowMetrics:
     actual = scored["actual_mwh"].to_numpy(dtype=float)
     predicted = scored["predicted_mwh"].to_numpy(dtype=float)
     errors = predicted - actual
-    # Same MAPE definition as compute_naive_baseline_metrics: actual = 0 is excluded.
+    # Same MAPE definition as src.backtest.mape: actual = 0 is excluded.
     nonzero = actual != 0
     mape = (
         float(np.mean(np.abs(errors[nonzero] / actual[nonzero])) * 100) if nonzero.any() else None

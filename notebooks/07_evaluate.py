@@ -22,10 +22,11 @@ if root_path not in sys.path:
 # %% [markdown]
 # # 07_evaluate
 # **Purpose:** Compare new Challenger models against the current Production run, scoring
-# both on the same out-of-sample rows (spec 011).
-# **Inputs:** MLflow runs + `backtest_predictions.json` artifacts, `workspace.energy_forecasting.silver_features`
+# both on the same out-of-sample rows (spec 011), with the champion's inputs built by the
+# same point-in-time feature function as training and serving (spec 019).
+# **Inputs:** MLflow runs + `backtest_predictions.json` artifacts, `silver_features` (load),
+# `bronze_weather_forecast`
 # **Outputs:** `workspace.energy_forecasting.model_evaluation` Delta table
-# **Last Updated:** 2026-10-20
 
 # COMMAND ----------
 
@@ -47,12 +48,12 @@ from pyspark.sql.types import (
 
 from src.config import (
     CATALOG,
-    CURRENT_DATA_VERSION,
+    CURRENT_RUN_FILTER,
     EVALUATED_MODELS,
-    MODEL_INPUT_FEATURES,
     PATHS,
     SCHEMA,
 )
+from src.pit_features import FEATURES, build_features
 from src.promotion import (
     BACKTEST_ARTIFACT,
     MIN_COMMON_ROWS,
@@ -65,14 +66,17 @@ from src.promotion import (
     served_data_end,
     to_naive_utc,
 )
-from src.target_construction import build_horizon_target
 
 # COMMAND ----------
 
 dbutils.widgets.text("mape_improvement_threshold", "0.01")
 THRESHOLD = float(dbutils.widgets.get("mape_improvement_threshold"))
 
-CONFIG = {"eval_table": PATHS.table_eval, "silver_table": PATHS.table_silver}
+CONFIG = {
+    "eval_table": PATHS.table_eval,
+    "silver_table": PATHS.table_silver,
+    "weather_table": PATHS.table_weather_forecast,
+}
 
 # COMMAND ----------
 
@@ -90,7 +94,7 @@ def get_challenger_run(model_name: str):
         experiment_ids=EXPERIMENT_IDS,
         filter_string=(
             f"tags.model_name = '{model_name}' AND tags.leak_affected = 'false' "
-            f"AND tags.data_version = '{CURRENT_DATA_VERSION}'"
+            f"AND {CURRENT_RUN_FILTER}"
         ),
         order_by=["attributes.start_time DESC"],
         max_results=1,
@@ -106,7 +110,7 @@ def get_champion_run(model_name: str, challenger_run_id: str):
         filter_string=(
             f"tags.model_name = '{model_name}' AND tags.production = 'true' "
             "AND tags.leak_affected = 'false' "
-            f"AND tags.data_version = '{CURRENT_DATA_VERSION}'"
+            f"AND {CURRENT_RUN_FILTER}"
         ),
         max_results=50,
     )
@@ -126,48 +130,27 @@ def load_backtest(run) -> pd.DataFrame | None:
     return df
 
 
-_SILVER_CACHE: dict[str, pd.DataFrame] = {}
+_INPUT_CACHE: dict[str, pd.DataFrame] = {}
 
 
-def load_silver() -> pd.DataFrame:
-    if "pdf" not in _SILVER_CACHE:
-        pdf = spark.read.table(CONFIG["silver_table"]).toPandas()
-        pdf["timestamp"] = pd.to_datetime(pdf["timestamp"]).map(to_naive_utc)
-        _SILVER_CACHE["pdf"] = pdf
-    return _SILVER_CACHE["pdf"]
+def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Actual load and as-issued weather forecasts, read once."""
+    if not _INPUT_CACHE:
+        load = spark.read.table(CONFIG["silver_table"]).select("timestamp", "value_mwh").toPandas()
+        weather = spark.read.table(CONFIG["weather_table"]).toPandas()
+        _INPUT_CACHE.update(load=load, weather=weather)
+    return _INPUT_CACHE["load"], _INPUT_CACHE["weather"]
 
 
 def predict_with_champion(champion, model_name: str, horizon: int, rows: pd.DataFrame) -> pd.Series:
-    """Scores the champion's served model on exactly the challenger's backtest rows,
-    building inputs the same way 05/06 built them for the challenger."""
-    model_uri = f"runs:/{champion.info.run_id}/model"
-    silver = load_silver()
-
-    if "lgbm" in model_name:
-        model = mlflow.lightgbm.load_model(model_uri)
-        feats = build_horizon_target(silver, horizon).set_index("timestamp")
-        trained = model.booster_.feature_name()
-        X = feats.reindex(rows["timestamp"])[[c for c in trained if c in MODEL_INPUT_FEATURES]]
-        complete = X.notna().all(axis=1).values
-        X = X.astype({c: bool for c in ("is_weekend", "is_holiday") if c in X.columns})
-        preds = pd.Series(float("nan"), index=rows.index)
-        if complete.any():
-            preds[complete] = model.predict(X[complete])
-        return preds
-
-    model = mlflow.prophet.load_model(model_uri)
-    temps = silver.set_index("timestamp")["temperature_c"].reindex(rows["target_timestamp"])
-    complete = temps.notna().values
-    preds = pd.Series(float("nan"), index=rows.index)
-    if complete.any():
-        p_df = pd.DataFrame(
-            {
-                "ds": rows["target_timestamp"].values[complete],
-                "temperature_c": temps.values[complete],
-            }
-        )
-        preds[complete] = model.predict(p_df)["yhat"].values
-    return preds
+    """Scores the champion's served model on exactly the challenger's backtest rows
+    (`timestamp` = issuance hour), on the same point-in-time features (spec 019)."""
+    model = mlflow.lightgbm.load_model(f"runs:/{champion.info.run_id}/model")
+    if list(model.booster_.feature_name()) != list(FEATURES):
+        raise ValueError(f"Champion {champion.info.run_id} was trained on other features.")
+    load, weather = load_inputs()
+    feats = build_features(load, weather, rows["timestamp"], include_target=False)
+    return pd.Series(model.predict(feats[FEATURES]), index=rows.index)
 
 
 def compare_on_common_window(challenger, champion, model_name: str, horizon: int) -> dict:
@@ -184,7 +167,7 @@ def compare_on_common_window(challenger, champion, model_name: str, horizon: int
     if backtest is None:
         return logged
 
-    family = "lgbm" if "lgbm" in model_name else "prophet"
+    family = "lgbm"
     common = select_common_window(backtest, served_data_end(champion))
     if len(common) < MIN_COMMON_ROWS[family]:
         logger.warning(
@@ -193,7 +176,11 @@ def compare_on_common_window(challenger, champion, model_name: str, horizon: int
         )
         return logged
 
-    champion_pred = predict_with_champion(champion, model_name, horizon, common)
+    try:
+        champion_pred = predict_with_champion(champion, model_name, horizon, common)
+    except ValueError as e:
+        logger.warning(f"{model_name}: champion cannot be scored on the common rows: {e}")
+        return logged
     valid = champion_pred.notna() & common["actual"].notna()
     if valid.sum() < MIN_COMMON_ROWS[family]:
         logger.warning(f"{model_name}: champion could only score {valid.sum()} common rows.")
