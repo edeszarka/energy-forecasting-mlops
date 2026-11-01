@@ -1,7 +1,7 @@
 # Spec 018 — Error-triggered retraining
 
 - **Status:** Approved (owner, 2026-11-01: Q1–Q3 as proposed); implemented on this branch
-- **Branch:** `feature/018-error-triggered-retraining`
+- **Branch:** `feature/018-error-triggered-retraining-impl`
 - **Backlog:** BL-09 (data drift triggers on seasonality); supersedes the trigger part of spec 011
 - **Decisions:** ADR-0007 (retraining is triggered by forecast error; data drift is diagnostic only), proposed with this spec
 - **Depends on:** spec 017 (`forecast_error_monitor`, `is_served`, shadow scoring)
