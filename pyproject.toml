@@ -47,6 +47,7 @@ known-first-party = ["src"]
 
 [tool.ruff.lint.per-file-ignores]
 "notebooks/*.py" = ["F821", "E402"] # Ignore undefined globals (spark/dbutils) and top-level import rules in notebooks
+"scripts/backfill_017_naive_gold.py" = ["F821", "E402"] # Databricks notebook (spark/dbutils), run from scripts/
 
 [tool.mypy]
 python_version = "3.11"

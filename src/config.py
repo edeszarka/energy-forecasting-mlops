@@ -60,6 +60,7 @@ class DataPaths:
     table_gold: str = f"{CATALOG}.{SCHEMA}.gold_forecasts"
     table_eval: str = f"{CATALOG}.{SCHEMA}.model_evaluation"
     table_promotion: str = f"{CATALOG}.{SCHEMA}.promotion_log"
+    table_error_monitor: str = f"{CATALOG}.{SCHEMA}.forecast_error_monitor"
     table_ingestion_log: str = f"{CATALOG}.{SCHEMA}.ingestion_log"
 
     # Volume paths for files/artifacts
@@ -141,6 +142,19 @@ LOAD_MAX_MW: Final[float] = 9000.0  # PROVISIONAL
 # stretched 4x (pre-013 parser) give -0.36 to -0.14, the owner's corrupted
 # months 0.02-0.22.
 DQ_MIN_CORR_24H: Final[float] = 0.5  # PROVISIONAL
+
+# LIVE ERROR MONITORING (ADR-0006, spec 017)
+# PROVISIONAL for the first month. Seasonal naive (T-168h) on the rebuilt silver,
+# 2024-01 -> 2026-10: weekly MAPE median 7.28%, p90 13.21%, p95 15.69%, max 22.53%
+# (Easter Monday week 2026). The ceiling only catches breakage, not hard weeks.
+NAIVE_MODEL_NAME: Final[str] = "seasonal_naive"
+ERROR_WINDOWS_HOURS: Final[tuple[int, ...]] = (24, 168, 720)
+ERROR_ALERT_WINDOW_HOURS: Final[int] = 168
+ERROR_MAPE_CEILING: Final[float] = 25.0  # PROVISIONAL
+ERROR_MIN_SKILL: Final[float] = 0.0  # PROVISIONAL; skill = 1 - model MAPE / naive MAPE
+ERROR_SHADOW_SKILL: Final[float] = 0.05  # PROVISIONAL
+ERROR_SHADOW_MIN_ROWS: Final[int] = 120
+ERROR_MIN_COVERAGE: Final[float] = 0.8  # PROVISIONAL
 
 # HUNGARIAN PUBLIC HOLIDAYS (Fixed dates)
 FIXED_HOLIDAYS: Final[dict[int, list[int]]] = {

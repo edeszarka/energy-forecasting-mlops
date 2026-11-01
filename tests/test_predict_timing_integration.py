@@ -26,6 +26,7 @@ from src.forecast_timing import (
     serving_anchor_timestamps,
     serving_target_timestamps,
 )
+from src.gold_rows import combine_gold_rows
 from src.promotion import pick_production_run
 
 # pyspark is not a runtime/test dependency (see pyproject.toml); fall back to a
@@ -90,6 +91,8 @@ def _load_notebook_functions(*names: str, **overrides) -> dict:
         "NAIVE_MODEL_VERSION": "seasonal_naive_t-168h",
         "HUNGARIAN_HOLIDAYS": set(),
         "CURRENT_DATA_VERSION": "2",
+        # Spec 017 shadow scoring
+        "combine_gold_rows": combine_gold_rows,
         **overrides,
     }
     exec(compile(tree, str(NOTEBOOK_PATH), "exec"), namespace)
@@ -185,9 +188,17 @@ class _FakeDeltaTable:
 
 
 class _FakeSpark:
-    def __init__(self):
+    def __init__(self, columns=("is_served",)):
         self.catalog = _FakeCatalog()
         self._store = {}
+        self._columns = list(columns)
+        self.statements = []
+
+    def table(self, name):
+        return SimpleNamespace(columns=self._columns)
+
+    def sql(self, statement):
+        self.statements.append(statement)
 
     def createDataFrame(self, df, schema):
         return _FakeSourceFrame(df.to_dict("records"))
@@ -384,6 +395,8 @@ RUN_AT = datetime(2026, 10, 24, 5, 0, tzinfo=UTC)
 SERVE_CONFIG = {"pipeline_run_id": "test-run"}
 SERVE_FUNCTIONS = (
     "load_production_model",
+    "load_shadow_model",
+    "lgbm_forecasts",
     "prepare_inference_features",
     "generate_forecasts",
     "generate_naive_forecasts",
@@ -471,22 +484,31 @@ def test_serves_production_lgbm_run_on_lgbm_targets():
 
     assert mode == "energy_lgbm_24h"
     assert loaded == ["runs:/prod/model"]
-    assert set(result["model_name"]) == {"energy_lgbm_24h"}
-    assert list(result["timestamp"]) == _expected_targets()  # run+25 … run+48
+    served = result[result["is_served"]]
+    assert set(served["model_name"]) == {"energy_lgbm_24h"}
+    assert list(served["timestamp"]) == _expected_targets()  # run+25 … run+48
+    # Spec 017: naive is written on the same hours, not served.
+    naive = result[result["model_name"] == "seasonal_naive"]
+    assert list(naive["timestamp"]) == _expected_targets()
+    assert not naive["is_served"].any()
 
 
-def test_ac3_unpromoted_best_mape_run_is_never_loaded():
+def test_ac3_unpromoted_best_mape_run_is_never_served():
     loaded = []
     client = _FakeMlflowClient([_run("best-mape", production=False, mape=0.5)])
 
     result, mode = _serve(client, loaded_uris=loaded)
 
     assert mode == "seasonal_naive"
-    assert loaded == []  # LightGBM never loaded
-    assert all("tags.production = 'true'" in f for f in client.filters)
-    assert set(result["model_name"]) == {"seasonal_naive"}
-    assert set(result["model_version"]) == {"seasonal_naive_t-168h"}
+    assert "tags.production = 'true'" in client.filters[0]  # serving looks only at production
+    served = result[result["is_served"]]
+    assert set(served["model_name"]) == {"seasonal_naive"}
+    assert set(served["model_version"]) == {"seasonal_naive_t-168h"}
     assert set(result["horizon_hours"]) == {24}
+    # Spec 017 T2: the unpromoted run is scored in shadow only.
+    assert loaded == ["runs:/best-mape/model"]
+    shadow = result[result["model_name"] == "energy_lgbm_24h"]
+    assert len(shadow) == 24 and not shadow["is_served"].any()
 
 
 def test_ac4_latest_promoted_at_wins_over_lowest_mape():
@@ -575,3 +597,80 @@ def test_ac6_naive_raises_when_silver_too_stale():
 
     with pytest.raises(ValueError, match="no T-168h value"):
         _serve(_FakeMlflowClient([]), history=history)
+
+
+# ─────────────────── spec 017 T1/T2: is_served, naive always, shadow LightGBM ───────────────────
+
+
+def test_ac3_naive_serving_marks_naive_rows_served():
+    result, mode = _serve(_FakeMlflowClient([]))
+
+    assert mode == "seasonal_naive"
+    assert set(result["model_name"]) == {"seasonal_naive"}  # no v2 run, so no shadow
+    assert result["is_served"].all()
+
+
+def test_ac3_production_serving_does_not_look_up_a_shadow_run():
+    loaded = []
+    client = _FakeMlflowClient(
+        [
+            _run("prod", promoted_at="2026-10-21T21:15:08+00:00"),
+            _run("newer-unpromoted", production=False),
+        ]
+    )
+
+    _serve(client, loaded_uris=loaded)
+
+    assert loaded == ["runs:/prod/model"]
+    assert len(client.filters) == 1
+
+
+def test_ac3_shadow_rows_carry_their_run_id_and_use_the_current_data_version():
+    client = _FakeMlflowClient([_run("shadow-run", production=False)])
+
+    result, _ = _serve(client)
+
+    shadow = result[result["model_name"] == "energy_lgbm_24h"]
+    assert set(shadow["model_version"]) == {"shadow-run"}
+    assert "tags.data_version = '2'" in client.filters[-1]
+    assert list(shadow["timestamp"]) == _expected_targets()
+
+
+def test_ac3_shadow_failure_leaves_served_naive_rows_intact():
+    client = _FakeMlflowClient([_run("shadow-run", production=False)])
+
+    result, mode = _serve(client, model=_RaisingModel())
+
+    assert mode == "seasonal_naive"
+    assert set(result["model_name"]) == {"seasonal_naive"}
+    assert len(result) == 24 and result["is_served"].all()
+
+
+def test_ac3_lgbm_still_serves_when_naive_has_no_source_hours():
+    # 200 rows ending 121h before the run: features build, but no T-168h source exists.
+    history = _silver_history(end=RUN_AT - pd.Timedelta(hours=200))
+    client = _FakeMlflowClient([_run("prod", promoted_at="2026-10-21T21:15:08+00:00")])
+
+    result, mode = _serve(client, history=history)
+
+    assert mode == "energy_lgbm_24h"
+    assert set(result["model_name"]) == {"energy_lgbm_24h"}
+    assert result["is_served"].all()
+
+
+def test_write_forecasts_adds_is_served_column_to_existing_table():
+    write_forecasts = _load_notebook_functions("write_forecasts")["write_forecasts"]
+    spark = _FakeSpark(columns=("forecast_id", "timestamp"))
+
+    write_forecasts(_forecast_frame(), spark, {"forecast_table": "gold"}, is_backfill=False)
+
+    assert spark.statements == ["ALTER TABLE gold ADD COLUMNS (is_served BOOLEAN)"]
+
+
+def test_write_forecasts_leaves_schema_alone_when_is_served_exists():
+    write_forecasts = _load_notebook_functions("write_forecasts")["write_forecasts"]
+    spark = _FakeSpark()
+
+    write_forecasts(_forecast_frame(), spark, {"forecast_table": "gold"}, is_backfill=False)
+
+    assert spark.statements == []

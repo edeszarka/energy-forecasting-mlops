@@ -11,3 +11,4 @@ Format: `NNNN-short-title.md`. Statuses: Proposed, Accepted, Superseded by ADR-N
 | [0003](0003-data-versioning-of-models.md) | Version the training data; serve only current-version models | Proposed | 014 |
 | [0004](0004-data-quality-checks-fail-the-pipeline.md) | Data-quality checks fail the pipeline instead of warning | Proposed | 013, 014 |
 | [0005](0005-separate-backfill-path.md) | A separate backfill path for historical data | Proposed | 014 |
+| [0006](0006-live-error-monitoring-and-shadow-scoring.md) | Live error monitoring against naive, with shadow scoring | Proposed | 017 |

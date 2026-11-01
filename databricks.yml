@@ -12,6 +12,11 @@ resources:
         quartz_cron_expression: "0 5 * * * ?"
         timezone_id: "UTC"
       max_concurrent_runs: 1
+      # Spec 017: 09_error_monitor fails the run when a forecast error alert
+      # starts, so a failure email is the alert channel.
+      email_notifications:
+        on_failure:
+          - ${workspace.current_user.userName}
       environments:
         - environment_key: "default"
           spec:
@@ -54,6 +59,14 @@ resources:
             - task_key: "drift_check"
           notebook_task:
             notebook_path: ./notebooks/04_predict.py
+          environment_key: "default"
+          timeout_seconds: 900
+
+        - task_key: "error_monitor"
+          depends_on:
+            - task_key: "predict"
+          notebook_task:
+            notebook_path: ./notebooks/09_error_monitor.py
           environment_key: "default"
           timeout_seconds: 900
 
