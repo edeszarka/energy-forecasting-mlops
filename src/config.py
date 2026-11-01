@@ -156,6 +156,14 @@ ERROR_SHADOW_SKILL: Final[float] = 0.05  # PROVISIONAL
 ERROR_SHADOW_MIN_ROWS: Final[int] = 120
 ERROR_MIN_COVERAGE: Final[float] = 0.8  # PROVISIONAL
 
+# ERROR-TRIGGERED RETRAINING (ADR-0007, spec 018). PROVISIONAL for the first month.
+# The served run is judged only on hours it served itself.
+ERROR_RETRAIN_MIN_HOURS: Final[int] = 72  # evidence floor for the current run
+ERROR_RETRAIN_STREAK_HOURS: Final[int] = 24  # consecutive degraded hourly checks
+ERROR_RETRAIN_COOLDOWN_HOURS: Final[float] = 72.0
+ERROR_RETRAIN_MAX_SKILL: Final[float] = 0.0  # degraded when skill vs naive is below this
+RETRAIN_PENDING_TIMEOUT_HOURS: Final[float] = 6.0  # spec 011
+
 # HUNGARIAN PUBLIC HOLIDAYS (Fixed dates)
 FIXED_HOLIDAYS: Final[dict[int, list[int]]] = {
     1: [1],  # New Year

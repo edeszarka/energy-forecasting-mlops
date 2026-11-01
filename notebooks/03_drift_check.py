@@ -72,7 +72,8 @@ print("version:", __import__("evidently").__version__)
 
 # %% [markdown]
 # # 03_drift_check
-# **Purpose:** Monitor data drift using Evidently AI (forecast error: 09_error_monitor).
+# **Purpose:** Diagnose data drift using Evidently AI. Never triggers retraining (spec 018);
+# forecast error and the retrain trigger live in 09_error_monitor.
 # **Inputs:** `workspace.energy_forecasting.silver_features`
 # **Outputs:** `workspace.energy_forecasting.drift_control`, HTML reports in Volumes.
 # **Last Updated:** 2024-05-21
@@ -81,7 +82,6 @@ print("version:", __import__("evidently").__version__)
 
 # COMMAND ----------
 
-import json
 import logging
 import os
 import sys
@@ -115,12 +115,10 @@ from src.config import (
     CURRENT_DATA_VERSION,
     MODEL_INPUT_FEATURES,
     PATHS,
-    RETRAIN_FLAG_PATH,
     SCHEMA,
 )
-from src.drift import count_consecutive_drift_hours, decide_retrain, select_drift_columns
+from src.drift import count_consecutive_hours, select_drift_columns
 from src.promotion import pick_production_run
-from src.retrain_trigger import trigger_retraining_job
 
 # COMMAND ----------
 
@@ -129,26 +127,16 @@ from src.retrain_trigger import trigger_retraining_job
 
 # Widgets
 dbutils.widgets.text("drift_threshold", "0.15")
-dbutils.widgets.text("consecutive_hours_threshold", "3")
 dbutils.widgets.text("current_window_days", "7")
 dbutils.widgets.text("min_rows_for_drift", "100")
-# Job id of energy_retraining_pipeline; injected by databricks.yml. Empty = flag only.
-dbutils.widgets.text("retraining_job_id", "")
-dbutils.widgets.text("retrain_cooldown_hours", "24")
-dbutils.widgets.text("pending_timeout_hours", "6")
 
 CONFIG = {
     "silver_table": PATHS.table_silver,
     "drift_table": PATHS.table_drift,
     "report_base_path": PATHS.volume_reports,
-    "flag_path": RETRAIN_FLAG_PATH,
     "drift_threshold": float(dbutils.widgets.get("drift_threshold")),
-    "consecutive_hours_threshold": int(dbutils.widgets.get("consecutive_hours_threshold")),
     "current_window_days": int(dbutils.widgets.get("current_window_days")),
     "min_rows_for_drift": int(dbutils.widgets.get("min_rows_for_drift")),
-    "retraining_job_id": dbutils.widgets.get("retraining_job_id").strip(),
-    "retrain_cooldown_hours": float(dbutils.widgets.get("retrain_cooldown_hours")),
-    "pending_timeout_hours": float(dbutils.widgets.get("pending_timeout_hours")),
     "primary_model_name": "energy_lgbm_24h",
     "feature_columns": MODEL_INPUT_FEATURES,  # sourced from src/config.py
     # Calendar features are excluded from the drift test (spec 011 §1.4)
@@ -354,107 +342,12 @@ def get_consecutive_drift_hours(
         logger.warning(f"Could not read drift history: {e}")
         pairs = []
 
-    return count_consecutive_drift_hours(pairs, check_time, current_any_drift)
+    return count_consecutive_hours(pairs, check_time, current_any_drift)
 
 
 # COMMAND ----------
 
-# SECTION 6 — RETRAINING TRIGGER
-# ─────────────────────────────────
-
-
-def read_pending_since(config: dict) -> datetime | None:
-    """Returns when the outstanding retrain request was written, if any."""
-    path = Path(config["flag_path"])
-    if not path.exists():
-        return None
-    try:
-        with open(path) as f:
-            return datetime.fromisoformat(json.load(f)["triggered_at"])
-    except Exception as e:
-        # An unreadable flag must not block triggering forever.
-        logger.warning(f"Unreadable retrain flag {path}: {e}. Treating as stale.")
-        return None
-
-
-def should_trigger_retrain(
-    spark: SparkSession,
-    config: dict,
-    consecutive_hours: int,
-    any_drift_detected: bool,
-    drifted_features: list[str],
-) -> tuple[bool, str]:
-    """
-    Enforces trigger conditions, cooldown and pending-request timeout.
-    """
-    last_retrain_at = None
-    try:
-        last_retrain = (
-            spark.table(config["drift_table"])
-            .filter(F.col("retrain_triggered"))
-            .orderBy(F.col("check_timestamp").desc())
-            .limit(1)
-            .select("check_timestamp")
-            .collect()
-        )
-        if last_retrain:
-            last_retrain_at = last_retrain[0][0]
-    except Exception as e:
-        logger.warning(f"Could not read last retrain time (cooldown not applied): {e}")
-
-    should, reason = decide_retrain(
-        any_drift=any_drift_detected,
-        consecutive_hours=consecutive_hours,
-        consecutive_hours_threshold=config["consecutive_hours_threshold"],
-        now=datetime.now(UTC),
-        last_retrain_at=last_retrain_at,
-        cooldown_hours=config["retrain_cooldown_hours"],
-        pending_since=read_pending_since(config),
-        pending_timeout_hours=config["pending_timeout_hours"],
-    )
-    if should and drifted_features:
-        reason = f"{reason} Drifted features: {', '.join(drifted_features)}."
-    return should, reason
-
-
-# COMMAND ----------
-
-# SECTION 7 — WRITE FLAG FILE
-# ──────────────────────────────
-
-
-def write_retrain_flag(
-    config: dict,
-    reason: str,
-    consecutive_hours: int,
-    drifted_features: list,
-    job_run_id: int | None = None,
-):
-    """
-    Writes JSON flag file to Volume. It marks the request as pending until
-    08_promote_model deletes it (or it ages past pending_timeout_hours).
-    """
-    flag_data = {
-        "triggered_at": datetime.now(UTC).isoformat(),
-        "reason": reason,
-        "consecutive_drift_hours": consecutive_hours,
-        "drifted_features": drifted_features,
-        "job_run_id": job_run_id,
-        "pipeline_version": "2.0",
-    }
-
-    path = Path(config["flag_path"])
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(path, "w") as f:
-        json.dump(flag_data, f, indent=2)
-
-    return str(path)
-
-
-# COMMAND ----------
-
-# SECTION 8 — SAVE EVIDENTLY HTML REPORT
+# SECTION 6 — SAVE EVIDENTLY HTML REPORT
 # ─────────────────────────────────────────
 
 
@@ -480,7 +373,7 @@ def save_html_report(report: Report, config: dict, check_time: datetime) -> str:
 
 # COMMAND ----------
 
-# SECTION 9 — MAIN ORCHESTRATION
+# SECTION 7 — MAIN ORCHESTRATION
 # ──────────────────────────────────
 
 mlflow_client = MlflowClient()
@@ -522,35 +415,8 @@ data_drift = run_data_drift(ref_df, curr_df, CONFIG)
 any_drift = bool(data_drift["dataset_drift"])
 consecutive_hours = get_consecutive_drift_hours(spark, CONFIG, check_time, any_drift)
 
-# Trigger Retraining
-should_retrain, retrain_reason = should_trigger_retrain(
-    spark, CONFIG, consecutive_hours, any_drift, data_drift["drifted_features"]
-)
-
-retrain_run_id = None
-if should_retrain:
-    if CONFIG["retraining_job_id"]:
-        try:
-            retrain_run_id, msg = trigger_retraining_job(int(CONFIG["retraining_job_id"]))
-            logger.info(msg)
-        except Exception as e:
-            # Not raising: predict depends on this task. With retrain_triggered=False
-            # and no flag written, the next hourly check simply retries.
-            logger.error(f"Failed to start retraining job: {e}")
-            should_retrain = False
-            retrain_reason = f"Trigger failed: {e}"
-    else:
-        logger.warning(
-            "retraining_job_id not set — writing flag only (weekly retrain picks it up)."
-        )
-
-if should_retrain:
-    write_retrain_flag(
-        CONFIG, retrain_reason, consecutive_hours, data_drift["drifted_features"], retrain_run_id
-    )
-    logger.info(f"RETRAINING TRIGGERED: {retrain_reason}")
-else:
-    logger.info(f"No retraining triggered. Reason: {retrain_reason}")
+# Data drift is diagnostic only (spec 018, ADR-0007): it is recorded but never
+# starts a retrain. 09_error_monitor triggers retraining on forecast degradation.
 
 # Report
 report_path = save_html_report(data_drift["report"], CONFIG, check_time)
@@ -570,7 +436,7 @@ result_row = {
     "prediction_mae_current": None,
     "prediction_mae_reference": None,
     "consecutive_drift_hours": int(consecutive_hours),
-    "retrain_triggered": bool(should_retrain),
+    "retrain_triggered": False,
     "report_path": report_path,
     "created_at": datetime.now(UTC),
 }
@@ -595,8 +461,7 @@ print(f"""
 │ value_mwh drift score:     {data_drift["drift_score_value_mwh"]:.4f}
 │ temperature_c drift score:  {data_drift["drift_score_temp"]:.4f}
 │ Consecutive drift hours:   {consecutive_hours}
-│ Retrain triggered:         {should_retrain} (job run: {retrain_run_id or "N/A"})
-│ Retrain decision:          {retrain_reason}
+│ Retrain trigger:           none (diagnostic only; see 09_error_monitor)
 │ HTML report:               {report_path}
 └─────────────────────────────────────────────────┘
 """)

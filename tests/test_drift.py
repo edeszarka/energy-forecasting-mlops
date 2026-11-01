@@ -81,7 +81,7 @@ from datetime import UTC, datetime, timedelta  # noqa: E402
 import pytest  # noqa: E402
 
 from src.drift import (  # noqa: E402
-    count_consecutive_drift_hours,
+    count_consecutive_hours,
     decide_retrain,
     select_drift_columns,
 )
@@ -101,23 +101,23 @@ class TestSelectDriftColumns:
 
 class TestCountConsecutiveDriftHours:
     def test_zero_when_current_check_has_no_drift(self):
-        assert count_consecutive_drift_hours([(hours_ago(1), True)], NOW, False) == 0
+        assert count_consecutive_hours([(hours_ago(1), True)], NOW, False) == 0
 
     def test_counts_contiguous_hourly_streak(self):
         history = [(hours_ago(1), True), (hours_ago(2), True), (hours_ago(3), False)]
-        assert count_consecutive_drift_hours(history, NOW, True) == 3
+        assert count_consecutive_hours(history, NOW, True) == 3
 
     def test_gap_in_hours_breaks_streak(self):
         # Rows exist but are spread over days (job outage) — not consecutive hours.
         history = [(hours_ago(1), True), (hours_ago(30), True), (hours_ago(60), True)]
-        assert count_consecutive_drift_hours(history, NOW, True) == 2
+        assert count_consecutive_hours(history, NOW, True) == 2
 
     def test_history_order_does_not_matter(self):
         history = [(hours_ago(2), True), (hours_ago(1), True)]
-        assert count_consecutive_drift_hours(history, NOW, True) == 3
+        assert count_consecutive_hours(history, NOW, True) == 3
 
     def test_empty_history(self):
-        assert count_consecutive_drift_hours([], NOW, True) == 1
+        assert count_consecutive_hours([], NOW, True) == 1
 
 
 class TestDecideRetrain:

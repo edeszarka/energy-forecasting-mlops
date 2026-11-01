@@ -365,7 +365,7 @@ def write_promotion_log(
 
 
 def read_flag_file(config: dict) -> dict:
-    """Reads the retrain request written by 03_drift_check (if any)."""
+    """Reads the retrain request written by 09_error_monitor (if any; spec 018)."""
     p = Path(config["flag_path"])
     meta = {"triggered": False, "features": ""}
 
