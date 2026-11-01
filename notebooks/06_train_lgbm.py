@@ -77,9 +77,25 @@ logger = logging.getLogger("06_train_lgbm")
 # COMMAND ----------
 
 
+class MissingWeatherForecasts(RuntimeError):
+    """bronze_weather_forecast is missing or empty: nothing to train on (spec 019b B3)."""
+
+
 def read_inputs(spark) -> tuple[pd.DataFrame, pd.DataFrame]:
-    load = spark.read.table(PATHS.table_silver).select("timestamp", "value_mwh").toPandas()
+    """Silver load and weather forecasts. Raises MissingWeatherForecasts before any
+    MLflow run is created when the weather table is missing or empty."""
+    if not spark.catalog.tableExists(PATHS.table_weather_forecast):
+        raise MissingWeatherForecasts(
+            f"{PATHS.table_weather_forecast} does not exist. Run backfill.yml and one hourly "
+            "job (ingest_weather_forecast) first (spec 019 runbook)."
+        )
     weather = spark.read.table(PATHS.table_weather_forecast).toPandas()
+    if weather.empty:
+        raise MissingWeatherForecasts(
+            f"{PATHS.table_weather_forecast} is empty. Run backfill.yml for 2024-01-01 onwards "
+            "and one hourly job (ingest_weather_forecast) first (spec 019 runbook)."
+        )
+    load = spark.read.table(PATHS.table_silver).select("timestamp", "value_mwh").toPandas()
     for frame in (load, weather):
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
     return load, weather

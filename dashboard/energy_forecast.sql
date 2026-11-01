@@ -94,7 +94,7 @@ ORDER BY check_timestamp ASC, stream ASC;
 -- ============================================================
 SELECT
   check_timestamp,
-  model_name AS served_model,
+  model_name AS served_forecaster,  -- latest served row: model or a naive fallback
   SIZE(alerts) AS alert_count,
   ARRAY_JOIN(alerts, ', ') AS alerts
 FROM workspace.energy_forecasting.forecast_error_monitor

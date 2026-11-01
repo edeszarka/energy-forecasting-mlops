@@ -25,14 +25,16 @@ from src.config import (
     ERROR_SHADOW_SKILL,
     ERROR_WINDOWS_HOURS,
     NAIVE_MODEL_NAME,
+    NAIVE_MODEL_NAMES,
 )
 from src.forecast_timing import SERVED_MODEL
 from src.promotion import to_naive_utc
 
 SERVED_STREAM = "served"
+MODEL_STREAM = "served_model"  # served LightGBM rows only (spec 019b)
 NAIVE_STREAM = "naive"
 SHADOW_STREAM = "shadow_lgbm"
-STREAMS: tuple[str, ...] = (SERVED_STREAM, NAIVE_STREAM, SHADOW_STREAM)
+STREAMS: tuple[str, ...] = (SERVED_STREAM, MODEL_STREAM, NAIVE_STREAM, SHADOW_STREAM)
 
 SERVED_MAPE_HIGH = "SERVED_MAPE_HIGH"
 SERVED_WORSE_THAN_NAIVE = "SERVED_WORSE_THAN_NAIVE"
@@ -75,10 +77,13 @@ def _normalise(rows: pd.DataFrame) -> pd.DataFrame:
 
 
 def split_streams(gold: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """Splits gold rows into the three monitored streams.
+    """Splits gold rows into the monitored streams.
 
-    - served: `is_served = true`, or NULL on rows written before spec 017 (only
-      served rows existed then). Backfilled rows are never served.
+    - served: what was delivered — `is_served = true`, or NULL on rows written
+      before spec 017 (only served rows existed then), whichever forecaster
+      served (model, seasonal naive or daily naive). Backfilled rows never count.
+    - served_model: the served rows of the LightGBM model only; the model's live
+      metrics and its skill against naive come from these (spec 019b).
     - naive: every live `seasonal_naive` row, served or not.
     - shadow_lgbm: LightGBM rows written with `is_served = false`.
     """
@@ -89,19 +94,33 @@ def split_streams(gold: pd.DataFrame) -> dict[str, pd.DataFrame]:
     shadow = live[(live["model_name"] == SERVED_MODEL) & (is_served == False)]  # noqa: E712
     return {
         SERVED_STREAM: _normalise(served),
+        MODEL_STREAM: _normalise(served[served["model_name"] == SERVED_MODEL]),
         NAIVE_STREAM: _normalise(naive),
         SHADOW_STREAM: _normalise(shadow),
     }
 
 
-def latest_served_model(gold: pd.DataFrame) -> str | None:
-    """Model name of the most recent served target hour."""
+def _served_by_time(gold: pd.DataFrame) -> pd.DataFrame:
     live = gold[~gold["is_backfilled"].fillna(False).astype(bool)]
     served = live[live["is_served"].isna() | (live["is_served"] == True)]  # noqa: E712
-    if served.empty:
-        return None
-    ordered = served.assign(_ts=[to_naive_utc(t) for t in served["timestamp"]]).sort_values("_ts")
-    return str(ordered["model_name"].iloc[-1])
+    return served.assign(_ts=[to_naive_utc(t) for t in served["timestamp"]]).sort_values("_ts")
+
+
+def latest_served_model(gold: pd.DataFrame) -> str | None:
+    """The model behind the most recent target hour that a model served.
+
+    Naive fallbacks (seasonal or daily) never identify a model: hours they served
+    are skipped, and None means no model served in the given rows.
+    """
+    served = _served_by_time(gold)
+    models = served[~served["model_name"].isin(NAIVE_MODEL_NAMES)]
+    return None if models.empty else str(models["model_name"].iloc[-1])
+
+
+def latest_served_forecaster(gold: pd.DataFrame) -> str | None:
+    """`model_name` of the most recent served row, naive or not (labels the served stream)."""
+    served = _served_by_time(gold)
+    return None if served.empty else str(served["model_name"].iloc[-1])
 
 
 def _in_window(rows: pd.DataFrame, window_end: Any, window_hours: int) -> pd.DataFrame:
@@ -165,13 +184,13 @@ def paired_metrics(
 
 def evaluate_alerts(
     served: WindowMetrics,
-    served_vs_naive: PairedMetrics | None,
+    model_vs_naive: PairedMetrics | None,
     shadow_vs_naive: PairedMetrics | None,
     thresholds: Thresholds = DEFAULT_THRESHOLDS,
 ) -> list[str]:
     """Alert codes for one check (spec 017 T5), evaluated on the alert window.
 
-    `served_vs_naive` is None while naive itself is served. LOW_COVERAGE
+    `model_vs_naive` (LightGBM-served hours only) is None when no model served. LOW_COVERAGE
     suppresses the served alerts, which cannot be trusted on too few rows.
     """
     alerts = []
@@ -181,9 +200,9 @@ def evaluate_alerts(
         if served.mape is not None and served.mape > thresholds.mape_ceiling:
             alerts.append(SERVED_MAPE_HIGH)
         if (
-            served_vs_naive is not None
-            and served_vs_naive.relative_skill is not None
-            and served_vs_naive.relative_skill < thresholds.min_skill
+            model_vs_naive is not None
+            and model_vs_naive.relative_skill is not None
+            and model_vs_naive.relative_skill < thresholds.min_skill
         ):
             alerts.append(SERVED_WORSE_THAN_NAIVE)
     if (
@@ -240,23 +259,24 @@ def build_monitor_rows(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """One `forecast_error_monitor` row per (window, stream), and this check's alerts.
 
-    Alerts are stored on the served row of the alert window only.
+    Alerts are stored on the served row of the alert window only. The served
+    row measures what was delivered (any forecaster) and carries no skill; the
+    model's metrics and its skill against naive are on the `served_model` row,
+    computed on the LightGBM-served hours only, so hours served by a naive
+    fallback (seasonal or daily) never enter the model's skill or its alert.
     """
     streams = split_streams(gold)
-    served_model = latest_served_model(gold)
-    naive_is_served = served_model in (None, NAIVE_MODEL_NAME)
+    model = latest_served_model(gold)
     shadow_model = SERVED_MODEL if not streams[SHADOW_STREAM].empty else None
 
     rows: list[dict[str, Any]] = []
     alerts: list[str] = []
     for hours in windows:
         served = window_metrics(streams[SERVED_STREAM], check_timestamp, hours)
-        served_paired = (
-            None
-            if naive_is_served
-            else paired_metrics(
-                streams[SERVED_STREAM], streams[NAIVE_STREAM], check_timestamp, hours
-            )
+        model_paired = (
+            paired_metrics(streams[MODEL_STREAM], streams[NAIVE_STREAM], check_timestamp, hours)
+            if model
+            else None
         )
         shadow_paired = (
             paired_metrics(streams[SHADOW_STREAM], streams[NAIVE_STREAM], check_timestamp, hours)
@@ -264,19 +284,24 @@ def build_monitor_rows(
             else None
         )
         if hours == alert_window:
-            alerts = evaluate_alerts(served, served_paired, shadow_paired, thresholds)
+            alerts = evaluate_alerts(served, model_paired, shadow_paired, thresholds)
 
         rows.append(
             _row(
                 check_timestamp,
                 hours,
                 SERVED_STREAM,
-                served_model,
+                latest_served_forecaster(gold),
                 served,
-                served_paired,
+                None,
                 alerts if hours == alert_window else [],
             )
         )
+        if model_paired is not None:
+            model_metrics = window_metrics(streams[MODEL_STREAM], check_timestamp, hours)
+            rows.append(
+                _row(check_timestamp, hours, MODEL_STREAM, model, model_metrics, model_paired, [])
+            )
         naive = window_metrics(streams[NAIVE_STREAM], check_timestamp, hours)
         rows.append(_row(check_timestamp, hours, NAIVE_STREAM, NAIVE_MODEL_NAME, naive, None, []))
         if shadow_paired is not None:

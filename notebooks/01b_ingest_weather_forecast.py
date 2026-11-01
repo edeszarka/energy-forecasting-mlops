@@ -24,6 +24,8 @@ dbutils.library.restartPython()
 # MAGIC backfill (`raw_backfill/weather_forecast/`), both written by `src/weather_forecast.py`.
 # MAGIC
 # MAGIC One row per valid hour; the most recent fetch wins. Processed files are archived.
+# MAGIC The table is created at the start of every run if missing, also when there are no
+# MAGIC files (spec 019b B3).
 # MAGIC
 # MAGIC **Inputs:** JSON files in the two folders above
 # MAGIC
@@ -75,13 +77,23 @@ def list_json_files(path: str) -> list[str]:
         return []
 
 
+def ensure_table(spark) -> bool:
+    """Creates bronze_weather_forecast if missing (spec 019b B3); True if it was created.
+
+    Runs before anything else, also when there are no files, so readers
+    (04, 06, 07) always find the table.
+    """
+    if spark.catalog.tableExists(PATHS.table_weather_forecast):
+        return False
+    spark.createDataFrame([], FILE_SCHEMA).write.format("delta").saveAsTable(
+        PATHS.table_weather_forecast
+    )
+    return True
+
+
 def merge_forecasts(spark, rows) -> None:
     """Upsert by valid hour; a row only replaces an older or equal fetch."""
     sdf = spark.createDataFrame(rows, FILE_SCHEMA)
-    if not spark.catalog.tableExists(PATHS.table_weather_forecast):
-        spark.createDataFrame([], FILE_SCHEMA).write.format("delta").saveAsTable(
-            PATHS.table_weather_forecast
-        )
     (
         DeltaTable.forName(spark, PATHS.table_weather_forecast)
         .alias("t")
@@ -94,9 +106,12 @@ def merge_forecasts(spark, rows) -> None:
 
 # COMMAND ----------
 
+created = ensure_table(spark)
 files = [(f, archive) for folder, archive in SOURCES for f in list_json_files(folder)]
 if not files:
-    dbutils.notebook.exit(json.dumps({"status": "skipped", "reason": "no_files_found"}))
+    dbutils.notebook.exit(
+        json.dumps({"status": "skipped", "reason": "no_files_found", "table_created": created})
+    )
 
 frame = (
     spark.read.option("multiline", "true")

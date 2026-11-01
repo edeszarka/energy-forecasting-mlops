@@ -1,47 +1,58 @@
-"""Tests for gold row assembly and the naive gold history (spec 017 AC3, AC6)."""
+"""Tests for gold rows (spec 019b AC4) and the naive gold history (spec 017 AC6)."""
 
 import hashlib
 
 import numpy as np
 import pandas as pd
-import pytest
 
-from src.gold_rows import combine_gold_rows, gold_forecast_id, reconstruct_naive_gold
+from src.gold_rows import GOLD_COLUMNS, gold_forecast_id, gold_row, reconstruct_naive_gold
 
-
-def _frame(model_name, n=3):
-    ts = pd.date_range("2026-11-01", periods=n, freq="h", tz="UTC")
-    return pd.DataFrame({"timestamp": ts, "model_name": model_name, "predicted_mwh": 1.0})
+TARGET = pd.Timestamp("2026-11-03 10:00", tz="UTC")
+CREATED = pd.Timestamp("2026-11-02 12:07", tz="UTC")
 
 
-def test_ac3_model_served_marks_only_model_rows():
-    out = combine_gold_rows(_frame("seasonal_naive"), _frame("energy_lgbm_24h"), model_served=True)
-
-    assert out.groupby("model_name")["is_served"].unique().to_dict() == {
-        "energy_lgbm_24h": [True],
-        "seasonal_naive": [False],
+def _row(**overrides):
+    args = {
+        "model_name": "seasonal_naive",
+        "model_version": "seasonal_naive_t-168h",
+        "target": TARGET,
+        "issued_at": TARGET - pd.Timedelta(hours=24),
+        "is_catch_up": True,
+        "predicted_mwh": 4321,
+        "is_served": True,
+        "forecast_run_at": pd.Timestamp("2026-11-02 12:00", tz="UTC"),
+        "pipeline_run_id": "run-1",
+        "created_at": CREATED,
+        "fallback_reason": "no_production_run",
     }
+    return gold_row(**{**args, **overrides})
 
 
-def test_ac3_naive_served_with_shadow():
-    out = combine_gold_rows(_frame("seasonal_naive"), _frame("energy_lgbm_24h"), model_served=False)
+def test_ac4_gold_row_has_every_gold_column_and_no_written_at():
+    row = _row()
 
-    assert out[out["model_name"] == "seasonal_naive"]["is_served"].all()
-    assert not out[out["model_name"] == "energy_lgbm_24h"]["is_served"].any()
-
-
-def test_ac3_missing_frames_are_skipped():
-    naive_only = combine_gold_rows(_frame("seasonal_naive"), pd.DataFrame(), model_served=False)
-    model_only = combine_gold_rows(pd.DataFrame(), _frame("energy_lgbm_24h"), model_served=True)
-
-    assert len(naive_only) == 3 and naive_only["is_served"].all()
-    assert len(model_only) == 3 and model_only["is_served"].all()
-    assert combine_gold_rows(pd.DataFrame(), pd.DataFrame(), model_served=False).empty
+    assert list(row) == GOLD_COLUMNS
+    assert "written_at" not in row
 
 
-def test_ac3_served_model_without_rows_is_an_error():
-    with pytest.raises(ValueError, match="requires model rows"):
-        combine_gold_rows(_frame("seasonal_naive"), pd.DataFrame(), model_served=True)
+def test_ac4_gold_row_values():
+    row = _row()
+
+    assert row["forecast_id"] == gold_forecast_id("seasonal_naive", 24, TARGET)
+    assert row["timestamp"] == TARGET
+    assert row["issued_at"] == TARGET - pd.Timedelta(hours=24)
+    assert row["is_catch_up"] is True
+    assert row["created_at"] == CREATED  # the actual write time (D5)
+    assert row["predicted_mwh"] == 4321.0 and isinstance(row["predicted_mwh"], float)
+    assert row["fallback_reason"] == "no_production_run"
+    assert row["actual_mwh"] is None and row["is_backfilled"] is False
+
+
+def test_ac4_model_row_has_no_fallback_reason_by_default():
+    row = _row(model_name="energy_lgbm_24h", model_version="run-9", fallback_reason=None)
+
+    assert row["fallback_reason"] is None
+    assert row["model_version"] == "run-9"
 
 
 def test_forecast_id_matches_the_notebook_convention():
@@ -70,6 +81,7 @@ def test_ac6_naive_gold_equals_silver_one_week_earlier_without_leakage():
         assert row["forecast_run_at"] == row["timestamp"] - pd.Timedelta(hours=48)
     assert out["is_backfilled"].all()
     assert out["is_served"].isna().all()
+    assert out[["issued_at", "is_catch_up", "fallback_reason"]].isna().all().all()  # legacy (D7)
     assert out["actual_mwh"].isna().all()  # filled by 04's actual backfill
     assert set(out["model_name"]) == {"seasonal_naive"}
     assert list(out["forecast_id"]) == [

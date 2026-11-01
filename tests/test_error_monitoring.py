@@ -5,6 +5,7 @@ import pytest
 
 from src.error_monitoring import (
     LOW_COVERAGE,
+    MODEL_STREAM,
     NAIVE_STREAM,
     SERVED_MAPE_HIGH,
     SERVED_STREAM,
@@ -16,6 +17,7 @@ from src.error_monitoring import (
     WindowMetrics,
     build_monitor_rows,
     evaluate_alerts,
+    latest_served_forecaster,
     latest_served_model,
     new_failing_alerts,
     paired_metrics,
@@ -298,7 +300,7 @@ def test_monitor_rows_when_lgbm_serves_and_loses_to_naive():
 
     rows, alerts = build_monitor_rows(gold, END, windows=(168,), alert_window=168, thresholds=T)
 
-    assert {r["stream"] for r in rows} == {SERVED_STREAM, NAIVE_STREAM}  # no shadow rows
+    assert {r["stream"] for r in rows} == {SERVED_STREAM, MODEL_STREAM, NAIVE_STREAM}
     assert SERVED_MAPE_HIGH in alerts and SERVED_WORSE_THAN_NAIVE in alerts
 
 
@@ -309,3 +311,68 @@ def test_monitor_rows_on_empty_gold_raise_low_coverage():
 
     assert alerts == [LOW_COVERAGE]
     assert rows[0]["n"] == 0 and rows[0]["model_name"] is None
+
+
+# ───────────── spec 019b: mixed served stream (model, seasonal naive, daily naive) ─────────────
+
+
+def _mixed_gold():
+    """Last 168h: 100h served by LightGBM (2% off), 40h by seasonal naive, 28h by daily naive.
+
+    Seasonal naive (10% off) exists for the LightGBM hours too, as the unserved
+    comparison row; the daily-naive hours have no seasonal-naive row (T - 168h missing).
+    """
+    lgbm_end = END - pd.Timedelta(hours=68)
+    naive_end = END - pd.Timedelta(hours=28)
+    return pd.concat(
+        [
+            _gold("energy_lgbm_24h", 100, 102.0, 100.0, True, end=lgbm_end),
+            _gold("seasonal_naive", 100, 110.0, 100.0, False, end=lgbm_end),
+            _gold("seasonal_naive", 40, 130.0, 100.0, True, end=naive_end),
+            _gold("daily_naive", 28, 150.0, 100.0, True),
+        ],
+        ignore_index=True,
+    )
+
+
+def test_mixed_stream_model_metrics_come_only_from_lgbm_rows():
+    rows, alerts = build_monitor_rows(
+        _mixed_gold(), END, windows=(168,), alert_window=168, thresholds=T
+    )
+
+    by_stream = {r["stream"]: r for r in rows}
+    model = by_stream[MODEL_STREAM]
+    assert model["model_name"] == "energy_lgbm_24h"
+    assert model["n"] == 100
+    assert model["mape"] == pytest.approx(2.0)  # the naive-served hours are not in it
+    assert model["naive_mape_paired"] == pytest.approx(10.0)
+    assert model["relative_skill"] == pytest.approx(0.8)
+    served = by_stream[SERVED_STREAM]
+    assert served["n"] == 168  # what was delivered: all three forecasters
+    assert served["relative_skill"] is None and served["naive_mape_paired"] is None
+    assert served["model_name"] == "daily_naive"  # label: latest served forecaster
+    assert SERVED_WORSE_THAN_NAIVE not in alerts
+
+
+def test_daily_naive_hours_get_no_skill_and_raise_no_alert():
+    gold = pd.concat(
+        [
+            _gold("daily_naive", 168, 300.0, 100.0, True),  # 200% off, no seasonal-naive pair
+        ],
+        ignore_index=True,
+    )
+
+    rows, alerts = build_monitor_rows(gold, END, windows=(168,), alert_window=168, thresholds=T)
+
+    assert MODEL_STREAM not in {r["stream"] for r in rows}  # no model served, no model row
+    assert all(r["relative_skill"] is None for r in rows)
+    assert SERVED_WORSE_THAN_NAIVE not in alerts
+
+
+def test_latest_served_model_skips_naive_fallbacks():
+    gold = _mixed_gold()
+
+    assert latest_served_model(gold) == "energy_lgbm_24h"  # newest hours were daily naive
+    assert latest_served_forecaster(gold) == "daily_naive"
+    naive_only = gold[gold["model_name"] != "energy_lgbm_24h"]
+    assert latest_served_model(naive_only) is None

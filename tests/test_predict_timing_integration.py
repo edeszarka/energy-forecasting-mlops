@@ -1,15 +1,15 @@
-"""Integration tests for 04_predict: serving, fallback, shadow, gold writes.
+"""Integration tests for 04_predict: catch-up serving, fallback, shadow, gold writes.
 
 The functions under test live in the Databricks notebook ``notebooks/04_predict.py``,
 which cannot be imported directly (module-level ``dbutils``/``spark`` calls). We extract
 the function definitions via ``ast`` and exec them with a controlled namespace.
 
-Spec 019: a run at issuance hour τ forecasts exactly T = τ + 24h, on the same
-point-in-time features as training (src/pit_features.build_features).
+Target selection and the serving decision are tested in tests/test_serving_plan.py
+(spec 019b D6); these tests check that 04 calls them, builds features with the
+training function, and writes what they decide.
 """
 
 import ast
-import hashlib
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,11 +20,28 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.baseline import seasonal_naive_forecast
-from src.forecast_timing import SERVED_MODEL, issuance_hour, serving_target_timestamps
-from src.gold_rows import combine_gold_rows
-from src.pit_features import FEATURES, WEATHER_COLUMNS, build_features
+from src.config import DAILY_NAIVE_MODEL_NAME
+from src.forecast_timing import SERVED_MODEL
+from src.gold_rows import (
+    DAILY_NAIVE_MODEL_VERSION,
+    GOLD_COLUMNS,
+    gold_forecast_id,
+    gold_row,
+)
+from src.pit_features import DAILY_NAIVE, FEATURES, WEATHER_COLUMNS, WEEKLY_NAIVE, build_features
 from src.promotion import pick_production_run
+from src.serving_plan import (
+    DAILY_NAIVE as DAILY_NAIVE_DECISION,
+)
+from src.serving_plan import (
+    MODEL,
+    NAIVE,
+    NO_PRODUCTION_RUN,
+    covered_targets,
+    decide_serving,
+    plan_targets,
+    raise_on_model_errors,
+)
 
 # pyspark is not a runtime/test dependency (see pyproject.toml); fall back to a
 # permissive mock so the notebook's StructType(...) schema construction still runs.
@@ -44,22 +61,42 @@ except ImportError:  # pragma: no cover
     ) = MagicMock
 
 NOTEBOOK_PATH = Path(__file__).resolve().parents[1] / "notebooks" / "04_predict.py"
-RUN_AT = datetime(2026, 10, 24, 5, 0, tzinfo=UTC)
-TARGET = pd.Timestamp("2026-10-25 05:00", tz="UTC")
-SERVE_CONFIG = {"pipeline_run_id": "test-run"}
+NOW = pd.Timestamp("2026-10-24 05:00", tz="UTC")
+RUN_AT = NOW.to_pydatetime()
+H = pd.Timedelta(hours=1)
+CONFIG = {
+    "pipeline_run_id": "test-run",
+    "forecast_table": "gold",
+    "silver_table": "silver",
+    "weather_table": "weather",
+}
 SERVE_FUNCTIONS = (
     "load_production_model",
     "load_shadow_model",
-    "prepare_features",
-    "lgbm_forecasts",
-    "generate_forecasts",
-    "generate_naive_forecasts",
-    "serve_forecasts",
+    "load_model",
+    "predict_one",
+    "serve_targets",
 )
+REQUIRED = ["load_t_minus_48h", "load_t_minus_168h", "temperature_fc"]
 
 
 class ModelNotFoundError(Exception):
     """Stand-in for the notebook's class (only FunctionDefs are extracted)."""
+
+
+class _Col:
+    """Minimal stand-in for a pyspark Column: comparisons return itself."""
+
+    def __gt__(self, other):
+        return self
+
+    __le__ = __ge__ = __eq__ = __gt__  # type: ignore[assignment]
+
+    def cast(self, _):
+        return self
+
+
+FAKE_F = SimpleNamespace(col=lambda name: _Col(), lit=lambda value: _Col())
 
 
 def _load_notebook_functions(*names: str, **overrides) -> dict:
@@ -67,9 +104,9 @@ def _load_notebook_functions(*names: str, **overrides) -> dict:
     tree = ast.parse(NOTEBOOK_PATH.read_text(encoding="utf-8"))
     tree.body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     namespace = {
-        "hashlib": hashlib,
         "np": np,
         "pd": pd,
+        "F": FAKE_F,
         "datetime": datetime,
         "UTC": UTC,
         "logger": logging.getLogger("predict-test"),
@@ -84,18 +121,34 @@ def _load_notebook_functions(*names: str, **overrides) -> dict:
         "MlflowClient": object,
         "ModelNotFoundError": ModelNotFoundError,
         "pick_production_run": pick_production_run,
-        "seasonal_naive_forecast": seasonal_naive_forecast,
-        "serving_target_timestamps": serving_target_timestamps,
-        "issuance_hour": issuance_hour,
         "build_features": build_features,
         "FEATURES": FEATURES,
-        "REQUIRED_FEATURES": ["load_t_minus_48h", "load_t_minus_168h", "temperature_fc"],
+        "WEEKLY_NAIVE": WEEKLY_NAIVE,
+        "DAILY_NAIVE": DAILY_NAIVE,
+        "DAILY_NAIVE_DECISION": DAILY_NAIVE_DECISION,
+        "DAILY_NAIVE_MODEL_NAME": DAILY_NAIVE_MODEL_NAME,
+        "DAILY_NAIVE_MODEL_VERSION": DAILY_NAIVE_MODEL_VERSION,
+        "REQUIRED_FEATURES": REQUIRED,
+        "HISTORY_HOURS": 400,
+        "HORIZON_HOURS": 24,
+        "ADDED_GOLD_COLUMNS": {
+            "is_served": "BOOLEAN",
+            "issued_at": "TIMESTAMP",
+            "is_catch_up": "BOOLEAN",
+            "fallback_reason": "STRING",
+        },
+        "GOLD_COLUMNS": GOLD_COLUMNS,
         "SERVED_MODEL": SERVED_MODEL,
         "NAIVE_MODEL_NAME": "seasonal_naive",
         "NAIVE_MODEL_VERSION": "seasonal_naive_t-168h",
         "CURRENT_RUN_FILTER": "tags.data_version = '2' AND tags.feature_set = 'pit_24h_v1'",
         "FEATURE_SET": "pit_24h_v1",
-        "combine_gold_rows": combine_gold_rows,
+        "gold_row": gold_row,
+        "covered_targets": covered_targets,
+        "decide_serving": decide_serving,
+        "MODEL": MODEL,
+        "NAIVE": NAIVE,
+        "NO_PRODUCTION_RUN": NO_PRODUCTION_RUN,
         **overrides,
     }
     exec(compile(tree, str(NOTEBOOK_PATH), "exec"), namespace)
@@ -105,18 +158,18 @@ def _load_notebook_functions(*names: str, **overrides) -> dict:
 # ───────────────────────────── fakes ─────────────────────────────
 
 
-class _FakeLgbmModel:
-    """Minimal LightGBM-like regressor: no booster_, predicts 1000 + row index."""
+class _FeatureSumModel:
+    """Predicts a deterministic function of its inputs and records them."""
 
     def __init__(self):
         self.inputs = []
 
     def predict(self, x):
-        self.inputs.append(x)
-        return np.arange(len(x), dtype=float) + 1000.0
+        self.inputs.append(x.copy())
+        return x.fillna(0).sum(axis=1).to_numpy() / 10.0
 
 
-class _OtherFeaturesModel(_FakeLgbmModel):
+class _OtherFeaturesModel(_FeatureSumModel):
     booster_ = SimpleNamespace(feature_name=lambda: ["lag_24h", "temperature_c"])
 
 
@@ -125,22 +178,7 @@ class _RaisingModel:
         raise ValueError("predict exploded")
 
 
-class _FakeCatalog:
-    def tableExists(self, name):
-        return True
-
-
-class _FakeSourceFrame:
-    def __init__(self, records):
-        self.records = records
-
-    def alias(self, name):
-        return self
-
-
 class _FakeDeltaTable:
-    """In-memory stand-in for a Delta table implementing the MERGE contract used here."""
-
     last_condition = None
 
     def __init__(self, store):
@@ -179,24 +217,55 @@ class _FakeDeltaTable:
                 self.store[key] = dict(record)
 
 
+class _FakeSourceFrame:
+    def __init__(self, records):
+        self.records = records
+
+    def alias(self, name):
+        return self
+
+
+class _FakeTable:
+    def __init__(self, frame):
+        self.frame = frame
+        self.columns = list(frame.columns)
+
+    def filter(self, _):
+        return self
+
+    def select(self, *_):
+        return self
+
+    def withColumn(self, name, _):
+        return _FakeTable(self.frame.assign(**{name: None}))
+
+    def toPandas(self):
+        return self.frame.copy()
+
+
 class _FakeSpark:
-    def __init__(self, columns=("is_served",)):
-        self.catalog = _FakeCatalog()
+    def __init__(self, tables=None, gold_columns=("is_served",)):
+        self.tables = tables or {}
         self._store = {}
-        self._columns = list(columns)
         self.statements = []
+        self.gold_columns = list(gold_columns)
+        self.catalog = SimpleNamespace(
+            tableExists=lambda name: name in self.tables or name == "gold"
+        )
+
+    def table(self, name):
+        if name == "gold" and name not in self.tables:
+            return SimpleNamespace(columns=self.gold_columns)
+        return _FakeTable(self.tables[name])
 
     def createDataFrame(self, df, schema):
         return _FakeSourceFrame(df.to_dict("records"))
-
-    def table(self, name):
-        return SimpleNamespace(columns=self._columns)
 
     def sql(self, statement):
         self.statements.append(statement)
 
 
-def _run(run_id, *, production=True, promoted_at=None, mape=None):
+def _run(run_id, *, production=True, promoted_at="2026-10-21T21:15:08+00:00"):
     tags = {
         "model_name": "energy_lgbm_24h",
         "leak_affected": "false",
@@ -205,17 +274,14 @@ def _run(run_id, *, production=True, promoted_at=None, mape=None):
     }
     if production:
         tags["production"] = "true"
-    if promoted_at:
         tags["promoted_at"] = promoted_at
     return SimpleNamespace(
         info=SimpleNamespace(run_id=run_id, start_time=0),
-        data=SimpleNamespace(tags=tags, metrics={} if mape is None else {"mape": mape}),
+        data=SimpleNamespace(tags=tags, metrics={}),
     )
 
 
 class _FakeMlflowClient:
-    """Applies the production filter the way MLflow would and records every filter."""
-
     def __init__(self, runs, fail=False):
         self.runs = runs
         self.fail = fail
@@ -233,139 +299,296 @@ class _FakeMlflowClient:
         return list(self.runs)
 
 
-def _fake_mlflow(model, loaded_uris):
+def _fake_mlflow(model, loaded):
     def load_model(uri):
-        loaded_uris.append(uri)
+        loaded.append(uri)
         return model
 
     return SimpleNamespace(lightgbm=SimpleNamespace(load_model=load_model))
 
 
-def _history(hours=400, end=None):
-    end = pd.Timestamp(RUN_AT) - pd.Timedelta(hours=2) if end is None else end
-    index = pd.date_range(end=pd.Timestamp(end), periods=hours, freq="h")
-    return pd.DataFrame({"timestamp": index, "value_mwh": np.arange(hours, dtype=float) + 4000.0})
+def _history(hours=420, end=None):
+    end = NOW - 2 * H if end is None else end
+    index = pd.date_range(end=end, periods=hours, freq="h")
+    rng = np.random.default_rng(0)
+    return pd.DataFrame({"timestamp": index, "value_mwh": 4000.0 + rng.normal(0, 200, hours)})
 
 
-def _weather(hours=96):
-    index = pd.date_range(pd.Timestamp(RUN_AT) - pd.Timedelta(hours=24), periods=hours, freq="h")
-    return pd.DataFrame({"timestamp": index, **{c: 10.0 for c in WEATHER_COLUMNS}})
+def _weather(hours=120):
+    index = pd.date_range(NOW - 48 * H, periods=hours, freq="h")
+    rng = np.random.default_rng(1)
+    return pd.DataFrame(
+        {"timestamp": index, **{c: rng.normal(10, 3, hours) for c in WEATHER_COLUMNS}}
+    )
 
 
-def _serve(client, model=None, history=None, weather=None, loaded_uris=None):
-    loaded_uris = [] if loaded_uris is None else loaded_uris
+def _serve(
+    client,
+    plan,
+    model=None,
+    history=None,
+    weather=None,
+    weather_present=True,
+    loaded=None,
+    run_at=RUN_AT,
+):
+    loaded = [] if loaded is None else loaded
+    client = client if isinstance(client, _FakeMlflowClient) else _FakeMlflowClient(client)
     fns = _load_notebook_functions(
-        *SERVE_FUNCTIONS, mlflow=_fake_mlflow(model or _FakeLgbmModel(), loaded_uris)
+        *SERVE_FUNCTIONS, mlflow=_fake_mlflow(model or _FeatureSumModel(), loaded)
     )
     history = _history() if history is None else history
     weather = _weather() if weather is None else weather
-    return fns["serve_forecasts"](history, weather, client, 24, RUN_AT, SERVE_CONFIG)
+    rows, decisions = fns["serve_targets"](
+        plan, history, weather, weather_present, client, run_at, CONFIG
+    )
+    return pd.DataFrame(rows, columns=GOLD_COLUMNS), decisions
 
 
-def _fid(model_name: str, timestamp: pd.Timestamp) -> str:
-    return hashlib.md5(f"{model_name}_24_{timestamp.isoformat()}".encode()).hexdigest()
+def _only(target, run_at=NOW):
+    """Plan with just `target` uncovered."""
+    covered = [run_at + k * H for k in range(1, 25) if run_at + k * H != target]
+    return plan_targets(run_at, covered)
 
 
-PROD = {"promoted_at": "2026-10-21T21:15:08+00:00"}
+PROD = [_run("prod")]
 
 
-# ─────────────────── spec 019: one target, the training feature function ───────────────────
+# ─────────────────── AC2: catch-up equals in-time ───────────────────
 
 
-def test_ac4_serves_exactly_one_target_24h_after_issuance():
-    result, mode = _serve(_FakeMlflowClient([_run("prod", **PROD)]))
-
-    assert mode == "energy_lgbm_24h"
-    assert set(result["timestamp"]) == {TARGET}
-    assert len(result) == 2  # the served LightGBM row and the naive row
-    assert set(result["forecast_id"]) == {
-        _fid("energy_lgbm_24h", TARGET),
-        _fid("seasonal_naive", TARGET),
-    }
-
-
-def test_ac4_model_gets_the_same_features_as_training():
-    model = _FakeLgbmModel()
+def test_ac2_catch_up_equals_in_time_for_the_same_issuance():
+    issued = NOW - 3 * H
+    target = issued + 24 * H
     history, weather = _history(), _weather()
 
-    _serve(_FakeMlflowClient([_run("prod", **PROD)]), model=model, history=history, weather=weather)
-
-    expected = build_features(history, weather, [issuance_hour(RUN_AT)], include_target=False)
-    pd.testing.assert_frame_equal(model.inputs[0], expected[FEATURES])
-
-
-def test_ac4_run_trained_on_other_features_is_not_served():
-    result, mode = _serve(_FakeMlflowClient([_run("old", **PROD)]), model=_OtherFeaturesModel())
-
-    assert mode == "seasonal_naive"
-    assert set(result[result["is_served"]]["model_name"]) == {"seasonal_naive"}
-
-
-def test_ac4_missing_weather_forecast_falls_back_to_naive():
-    result, mode = _serve(
-        _FakeMlflowClient([_run("prod", **PROD)]), weather=pd.DataFrame(columns=["timestamp"])
+    late_model, timely_model = _FeatureSumModel(), _FeatureSumModel()
+    late_rows, _ = _serve(PROD, _only(target), late_model, history, weather)
+    timely_rows, _ = _serve(
+        PROD,
+        _only(target, run_at=issued),
+        timely_model,
+        history,
+        weather,
+        run_at=issued.to_pydatetime(),
     )
 
-    assert mode == "seasonal_naive"
-    assert set(result["model_name"]) == {"seasonal_naive"}  # the shadow is skipped as well
+    late, timely = (
+        r[r["model_name"] == "energy_lgbm_24h"].iloc[0] for r in (late_rows, timely_rows)
+    )
+    pd.testing.assert_frame_equal(late_model.inputs[0], timely_model.inputs[0])
+    assert late["predicted_mwh"] == timely["predicted_mwh"]
+    assert (late["is_catch_up"], timely["is_catch_up"]) == (True, False)
+    assert late["issued_at"] == timely["issued_at"] == issued
+    expected = build_features(history, weather, [issued], include_target=False)[FEATURES]
+    pd.testing.assert_frame_equal(late_model.inputs[0], expected)
 
 
-def test_ac4_late_ingestion_within_22h_still_serves_the_model():
-    # Load only up to τ - 24h: the model needs nothing newer.
-    history = _history(end=pd.Timestamp(RUN_AT) - pd.Timedelta(hours=24))
+def test_catch_up_fills_every_planned_target_in_one_run():
+    plan = plan_targets(NOW, covered=[])  # a whole day of missed runs
 
-    _, mode = _serve(_FakeMlflowClient([_run("prod", **PROD)]), history=history)
+    rows, decisions = _serve(PROD, plan)
 
-    assert mode == "energy_lgbm_24h"
+    served = rows[rows["is_served"]]
+    assert sorted(served["timestamp"]) == [NOW + k * H for k in range(1, 25)]
+    assert served["is_catch_up"].sum() == 23
+    assert {d.kind for _, d in decisions} == {MODEL}
 
 
-def test_ac4_naive_row_is_t_minus_168h():
+# ─────────────────── AC4: gold columns ───────────────────
+
+
+def test_ac4_rows_carry_issued_at_is_catch_up_and_fallback_reason():
+    target = NOW + 24 * H
+    rows, _ = _serve([], _only(target))  # no production run → naive
+
+    naive = rows[rows["model_name"] == "seasonal_naive"].iloc[0]
+    assert naive["forecast_id"] == gold_forecast_id("seasonal_naive", 24, target)
+    assert naive["issued_at"] == NOW and not naive["is_catch_up"]
+    assert naive["fallback_reason"] == "no_production_run" and naive["is_served"]
+    assert list(rows.columns) == GOLD_COLUMNS and "written_at" not in rows
+
+
+def test_ac4_model_rows_have_no_fallback_reason_and_naive_is_not_served():
+    rows, _ = _serve(PROD, _only(NOW + 24 * H))
+
+    model = rows[rows["model_name"] == "energy_lgbm_24h"].iloc[0]
+    naive = rows[rows["model_name"] == "seasonal_naive"].iloc[0]
+    assert (
+        model["is_served"] and model["fallback_reason"] is None and model["model_version"] == "prod"
+    )
+    assert not naive["is_served"] and naive["fallback_reason"] is None
+
+
+# ─────────────────── AC5 / AC6: fallbacks ───────────────────
+
+
+def test_fallback_model_inputs_missing_serves_naive_quietly():
+    target = NOW + 24 * H
+    weather = _weather()
+    weather = weather[weather["timestamp"] != target]
+
+    rows, decisions = _serve(PROD, _only(target), weather=weather)
+
+    assert decisions[0][1].fallback_reason == "model_inputs_missing:temperature_fc"
+    assert set(rows[rows["is_served"]]["model_name"]) == {"seasonal_naive"}
+    raise_on_model_errors(decisions)  # quiet: no exception
+
+
+def test_fallback_no_naive_input_writes_nothing_and_does_not_raise():
+    """No production run, and neither T - 168h nor T - 48h: skip (O1)."""
+    target = NOW + 24 * H
     history = _history()
+    history = history[~history["timestamp"].isin([target - 168 * H, target - 48 * H])]
+    weather = _weather()
+    weather = weather[weather["timestamp"] != target]
+
+    rows, decisions = _serve([], _only(target), history=history, weather=weather)
+
+    assert rows.empty
+    assert decisions[0][1].kind == "skip"
+    raise_on_model_errors(decisions)
+
+
+def test_d8_weekly_naive_missing_serves_daily_naive():
+    target = NOW + 24 * H
+    history = _history()
+    history = history[history["timestamp"] != target - 168 * H]
     value_by_ts = history.set_index("timestamp")["value_mwh"]
 
-    result, _ = _serve(_FakeMlflowClient([]), history=history)
+    rows, decisions = _serve(PROD, _only(target), history=history)
 
-    naive = result[result["model_name"] == "seasonal_naive"].iloc[0]
-    source = (TARGET - pd.Timedelta(hours=168)).tz_convert("UTC")
-    assert naive["predicted_mwh"] == value_by_ts[source]
+    assert decisions[0][1].kind == DAILY_NAIVE_DECISION
+    served = rows[rows["is_served"]]
+    assert len(rows) == 1 and len(served) == 1  # no seasonal-naive or shadow row
+    row = served.iloc[0]
+    assert row["model_name"] == "daily_naive" and row["model_version"] == "daily_naive_t-48h"
+    assert row["fallback_reason"] == "model_inputs_missing:load_t_minus_168h"
+    assert row["predicted_mwh"] == value_by_ts[target - 48 * H]
+    assert row["forecast_id"] == gold_forecast_id("daily_naive", 24, target)
+    raise_on_model_errors(decisions)  # quiet
 
 
-# ─────────────────── spec 013/017/018 serving rules ───────────────────
+def test_d8_model_error_with_missing_t_minus_168h_serves_daily_naive_then_fails():
+    target = NOW + 24 * H
+    history = _history()
+    history = history[history["timestamp"] != target - 168 * H]
+
+    rows, decisions = _serve(
+        _FakeMlflowClient([_run("prod")], fail=True), _only(target), history=history
+    )
+
+    served = rows[rows["is_served"]].iloc[0]
+    assert served["model_name"] == "daily_naive"
+    assert served["fallback_reason"] == "model_error:RuntimeError"
+    with pytest.raises(RuntimeError, match="model_error:RuntimeError"):
+        raise_on_model_errors(decisions)  # 04 calls this after write_forecasts
 
 
-def test_ac3_unpromoted_run_is_never_served_only_shadowed():
+def test_d8_weekly_and_daily_naive_missing_skips_without_exception():
+    target = NOW + 24 * H
+    history = _history()
+    history = history[~history["timestamp"].isin([target - 168 * H, target - 48 * H])]
+
+    rows, decisions = _serve(PROD, _only(target), history=history)
+
+    assert rows.empty
+    assert decisions[0][1].kind == "skip"
+    raise_on_model_errors(decisions)
+
+
+def test_ac6_weather_table_missing_serves_naive_without_shadow():
+    rows, decisions = _serve(
+        [_run("shadow", production=False)],
+        _only(NOW + 24 * H),
+        weather=pd.DataFrame(columns=["timestamp"]),
+        weather_present=False,
+    )
+
+    assert decisions[0][1].fallback_reason == "no_production_run"  # first match (B2 order)
+    assert set(rows["model_name"]) == {"seasonal_naive"}
+
+    rows, decisions = _serve(
+        PROD,
+        _only(NOW + 24 * H),
+        weather=pd.DataFrame(columns=["timestamp"]),
+        weather_present=False,
+    )
+    assert decisions[0][1].fallback_reason == "weather_table_missing"
+    assert set(rows["model_name"]) == {"seasonal_naive"}
+
+
+# ─────────────────── AC5b: model errors ───────────────────
+
+
+def test_model_error_mlflow_unreachable_writes_fallback_then_raises():
+    rows, decisions = _serve(_FakeMlflowClient([_run("prod")], fail=True), _only(NOW + 24 * H))
+
+    assert rows[rows["is_served"]]["fallback_reason"].tolist() == ["model_error:RuntimeError"]
+    with pytest.raises(RuntimeError, match="model_error:RuntimeError"):
+        raise_on_model_errors(decisions)
+
+
+def test_model_error_predict_raises():
+    _, decisions = _serve(PROD, _only(NOW + 24 * H), model=_RaisingModel())
+
+    assert decisions[0][1].fallback_reason == "model_error:ValueError"
+
+
+def test_model_error_feature_mismatch_is_an_error_not_a_quiet_fallback():
+    _, decisions = _serve(PROD, _only(NOW + 24 * H), model=_OtherFeaturesModel())
+
+    assert decisions[0][1].fallback_reason == "model_error:FeatureMismatch"
+
+
+def test_model_error_main_writes_before_it_raises():
+    tree = ast.parse(NOTEBOOK_PATH.read_text(encoding="utf-8"))
+    calls = {
+        n.value.func.id: n.lineno
+        for n in tree.body
+        if isinstance(n, ast.Expr)
+        and isinstance(n.value, ast.Call)
+        and isinstance(n.value.func, ast.Name)
+    }
+
+    assert calls["write_forecasts"] < calls["raise_on_model_errors"]
+
+
+# ─────────────────── spec 013/017/018 rules still hold ───────────────────
+
+
+def test_unpromoted_run_is_never_served_only_shadowed():
     loaded = []
-    client = _FakeMlflowClient([_run("best-mape", production=False, mape=0.5)])
+    client = _FakeMlflowClient([_run("best-mape", production=False)])
 
-    result, mode = _serve(client, loaded_uris=loaded)
+    rows, decisions = _serve(client, _only(NOW + 24 * H), loaded=loaded)
 
-    assert mode == "seasonal_naive"
+    assert decisions[0][1].fallback_reason == "no_production_run"
     assert "tags.production = 'true'" in client.filters[0]
-    assert set(result[result["is_served"]]["model_name"]) == {"seasonal_naive"}
     assert loaded == ["runs:/best-mape/model"]
-    shadow = result[result["model_name"] == "energy_lgbm_24h"]
+    shadow = rows[rows["model_name"] == "energy_lgbm_24h"]
     assert len(shadow) == 1 and not shadow["is_served"].any()
     assert set(shadow["model_version"]) == {"best-mape"}
 
 
-def test_ac4_latest_promoted_at_wins_over_lowest_mape():
+def test_latest_promoted_at_wins():
     loaded = []
     client = _FakeMlflowClient(
         [
-            _run("old-low-mape", promoted_at="2026-10-01T00:00:00+00:00", mape=1.0),
-            _run("new-high-mape", promoted_at="2026-10-21T21:15:08+00:00", mape=9.0),
+            _run("old", promoted_at="2026-10-01T00:00:00+00:00"),
+            _run("new", promoted_at="2026-10-21T21:15:08+00:00"),
         ]
     )
 
-    _serve(client, loaded_uris=loaded)
+    _serve(client, _only(NOW + 24 * H), loaded=loaded)
 
-    assert loaded == ["runs:/new-high-mape/model"]
+    assert loaded == ["runs:/new/model"]
 
 
 def test_every_run_lookup_filters_on_feature_set_and_data_version():
     client = _FakeMlflowClient([_run("shadow", production=False)])
 
-    _serve(client)
+    _serve(client, _only(NOW + 24 * H))
 
     assert len(client.filters) == 2
     assert all(
@@ -374,91 +597,71 @@ def test_every_run_lookup_filters_on_feature_set_and_data_version():
     )
 
 
-def test_production_rows_carry_the_run_id_and_naive_is_not_served():
-    result, _ = _serve(_FakeMlflowClient([_run("prod-run", **PROD)]))
+def test_the_model_is_loaded_once_per_run():
+    loaded = []
 
-    served = result[result["is_served"]]
-    assert set(served["model_version"]) == {"prod-run"}
-    assert not result[result["model_name"] == "seasonal_naive"]["is_served"].any()
+    _serve(_FakeMlflowClient(PROD), plan_targets(NOW, covered=[]), loaded=loaded)
 
-
-def test_production_serving_does_not_look_up_a_shadow_run():
-    client = _FakeMlflowClient([_run("prod", **PROD), _run("newer", production=False)])
-
-    _serve(client)
-
-    assert len(client.filters) == 1
+    assert loaded == ["runs:/prod/model"]
 
 
-def test_loader_error_falls_back_to_naive():
-    result, mode = _serve(_FakeMlflowClient([_run("prod")], fail=True))
-
-    assert mode == "seasonal_naive"
-    assert list(result["timestamp"]) == [TARGET]
+# ─────────────────── inputs and gold writes ───────────────────
 
 
-def test_predict_error_and_shadow_failure_leave_served_naive_intact():
-    result, mode = _serve(_FakeMlflowClient([_run("prod", **PROD)]), model=_RaisingModel())
+def test_load_serving_inputs_reports_missing_and_empty_weather_table():
+    load = _load_notebook_functions("load_serving_inputs")["load_serving_inputs"]
+    silver = _history()
 
-    assert mode == "seasonal_naive"
-    assert set(result["model_name"]) == {"seasonal_naive"}
-    assert result["is_served"].all()
+    _, weather, present = load(_FakeSpark({"silver": silver}), CONFIG, NOW)
+    assert present is False and weather.empty
 
+    _, weather, present = load(
+        _FakeSpark({"silver": silver, "weather": _weather().iloc[0:0]}), CONFIG, NOW
+    )
+    assert present is False
 
-def test_naive_raises_when_silver_too_stale_and_no_model_serves():
-    history = _history(end=pd.Timestamp(RUN_AT) - pd.Timedelta(hours=200))
-
-    with pytest.raises(ValueError, match="no T-168h value"):
-        _serve(_FakeMlflowClient([]), history=history)
-
-
-# ─────────────────── gold writes ───────────────────
+    _, weather, present = load(_FakeSpark({"silver": silver, "weather": _weather()}), CONFIG, NOW)
+    assert present is True and len(weather) == len(_weather())
 
 
-def _forecast_frame() -> pd.DataFrame:
-    fns = _load_notebook_functions("generate_forecasts")
-    feats = build_features(_history(), _weather(), [issuance_hour(RUN_AT)], include_target=False)
-    return fns["generate_forecasts"](
-        model=_FakeLgbmModel(),
-        model_name="energy_lgbm_24h",
-        model_version="run",
-        run_id="run",
-        features_df=feats,
-        horizon_hours=24,
-        forecast_run_at=RUN_AT,
-        config=SERVE_CONFIG,
+def test_read_covered_counts_served_rows_and_handles_a_gold_without_is_served():
+    read = _load_notebook_functions("read_covered")["read_covered"]
+    gold = pd.DataFrame(
+        {"timestamp": [NOW + H, NOW + 2 * H], "is_served": [True, False], "horizon_hours": 24}
     )
 
+    assert read(_FakeSpark({"gold": gold}), CONFIG, NOW) == {NOW + H}
+    legacy = gold.drop(columns="is_served")
+    assert read(_FakeSpark({"gold": legacy}), CONFIG, NOW) == {NOW + H, NOW + 2 * H}
 
-def test_write_forecasts_merges_on_forecast_id_only():
-    write_forecasts = _load_notebook_functions("write_forecasts")["write_forecasts"]
 
-    write_forecasts(_forecast_frame(), _FakeSpark(), {"forecast_table": "gold"}, is_backfill=False)
+def _rows_frame():
+    rows, _ = _serve(PROD, _only(NOW + 24 * H))
+    return rows
 
+
+def test_write_forecasts_adds_every_missing_gold_column():
+    write = _load_notebook_functions("write_forecasts")["write_forecasts"]
+    spark = _FakeSpark(gold_columns=("forecast_id", "timestamp", "is_served"))
+
+    write(_rows_frame(), spark, CONFIG, is_backfill=False)
+
+    assert spark.statements == [
+        "ALTER TABLE gold ADD COLUMNS (issued_at TIMESTAMP, is_catch_up BOOLEAN, fallback_reason STRING)"
+    ]
+
+
+def test_write_forecasts_is_insert_only_and_skips_an_empty_frame():
+    write = _load_notebook_functions("write_forecasts")["write_forecasts"]
+    spark = _FakeSpark(gold_columns=GOLD_COLUMNS)
+    frame = _rows_frame()
+    first = frame.iloc[0].to_dict()
+    spark._store[first["forecast_id"]] = {**first, "predicted_mwh": -1.0}
+
+    write(frame, spark, CONFIG, is_backfill=False)
+    assert spark._store[first["forecast_id"]]["predicted_mwh"] == -1.0  # covered rows stay
     assert _FakeDeltaTable.last_condition == "target.forecast_id = source.forecast_id"
 
-
-def test_write_forecasts_is_idempotent_and_keeps_actuals_outside_backfill():
-    write_forecasts = _load_notebook_functions("write_forecasts")["write_forecasts"]
-    frame = _forecast_frame()
-    spark = _FakeSpark()
-    first = frame.iloc[0].to_dict()
-    first["actual_mwh"] = 999.0
-    spark._store[first["forecast_id"]] = first
-
-    write_forecasts(frame, spark, {"forecast_table": "gold"}, is_backfill=False)
-    write_forecasts(frame, spark, {"forecast_table": "gold"}, is_backfill=False)
-    assert len(spark._store) == len(frame)
-    assert spark._store[first["forecast_id"]]["actual_mwh"] == 999.0
-
-    write_forecasts(frame, spark, {"forecast_table": "gold"}, is_backfill=True)
-    assert spark._store[first["forecast_id"]]["actual_mwh"] is None
-
-
-def test_write_forecasts_adds_is_served_column_to_existing_table():
-    write_forecasts = _load_notebook_functions("write_forecasts")["write_forecasts"]
-    spark = _FakeSpark(columns=("forecast_id", "timestamp"))
-
-    write_forecasts(_forecast_frame(), spark, {"forecast_table": "gold"}, is_backfill=False)
-
-    assert spark.statements == ["ALTER TABLE gold ADD COLUMNS (is_served BOOLEAN)"]
+    before = dict(spark._store)
+    write(pd.DataFrame(columns=GOLD_COLUMNS), spark, CONFIG, is_backfill=False)
+    assert spark._store == before

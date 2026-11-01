@@ -172,6 +172,9 @@ DQ_MIN_CORR_24H: Final[float] = 0.5  # PROVISIONAL
 # 2024-01 -> 2026-10: weekly MAPE median 7.28%, p90 13.21%, p95 15.69%, max 22.53%
 # (Easter Monday week 2026). The ceiling only catches breakage, not hard weeks.
 NAIVE_MODEL_NAME: Final[str] = "seasonal_naive"
+# Served only when T - 168h is missing (spec 019b D8). Neither naive identifies a model.
+DAILY_NAIVE_MODEL_NAME: Final[str] = "daily_naive"
+NAIVE_MODEL_NAMES: Final[tuple[str, ...]] = (NAIVE_MODEL_NAME, DAILY_NAIVE_MODEL_NAME)
 ERROR_WINDOWS_HOURS: Final[tuple[int, ...]] = (24, 168, 720)
 ERROR_ALERT_WINDOW_HOURS: Final[int] = 168
 ERROR_MAPE_CEILING: Final[float] = 25.0  # PROVISIONAL
