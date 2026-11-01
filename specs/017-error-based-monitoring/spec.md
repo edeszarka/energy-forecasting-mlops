@@ -1,6 +1,6 @@
 # Spec 017 — Error-based monitoring (live MAPE)
 
-- **Status:** Draft (2026-10-31), awaiting owner approval
+- **Status:** Approved (owner, 2026-10-31: Q1–Q4 as proposed); implemented on this branch
 - **Branch:** `feature/017-error-based-monitoring`
 - **Decisions:** ADR-0006 (live error monitoring and shadow scoring), proposed with this spec
 - **Evidence:** spec 014 runbook results (2026-10-31), seasonal-naive history on the rebuilt silver (§1)
@@ -47,7 +47,7 @@ Two things follow:
 ### T1 · Gold records what was served (ADR-0006)
 - Add `is_served BOOLEAN` to `gold_forecasts` (`ALTER TABLE ... ADD COLUMNS`, done by `04` when the column is missing; rows from before have NULL and are treated as served, since only served rows were written).
 - `forecast_id` is unchanged (`md5(model_name, horizon, target_ts)`), so served, shadow and naive rows for the same hour coexist.
-- `write_forecasts` keeps insert-only semantics: each target keeps its first forecast, which is the 24h-ahead one in normal operation. The lead time `timestamp − forecast_run_at` is computed by the monitor, not stored.
+- `write_forecasts` keeps insert-only semantics: each target keeps its first forecast, which is issued 48h ahead in normal operation (targets are run+25h … run+48h). The lead time `timestamp − forecast_run_at` is computed by the monitor, not stored.
 
 ### T2 · Naive is always written; LightGBM is written in shadow
 - `04_predict` writes, every hour, for the same target hours:
@@ -68,7 +68,7 @@ New `src/error_monitoring.py`:
 - New task after `predict` (which backfills actuals). Reads the last `max(window) + 24h` of gold.
 - Windows: 24h, 7d (168h), 30d (720h), keyed on target `timestamp`.
 - For each window, writes one row per scored stream to a new table `forecast_error_monitor`:
-  `check_timestamp, window_hours, stream (served | naive | shadow_lgbm), model_name, n, coverage, mape, mae, bias, naive_mape_paired, relative_skill, alerts (array<string>), data_version`.
+  `check_timestamp, window_hours, stream (served | naive | shadow_lgbm), model_name, n, coverage, mape, mae, bias, naive_mape_paired, relative_skill, alerts (array<string>), created_at`. Alerts are stored on the served row of the 7d window.
 - `served` is built per target hour from `is_served = true` rows (NULL counts as served).
 - Idempotent per `(check_timestamp, window_hours, stream)` (MERGE).
 
@@ -85,10 +85,10 @@ Evaluated on the 7d window; thresholds in `src/config.py`:
 Alerting (owner decision Q1, §7): the task **fails when an alert starts** (it was absent in the previous hour's row), so the job's failure email fires once per episode; it does not fail again while the alert persists. `SHADOW_BEATS_NAIVE` never fails the task. The monitor row is written before the task fails.
 
 ### T6 · Retire the old prediction-drift check
-- `03_drift_check.run_prediction_drift` and its columns stay readable in `drift_control`, but the check is removed from the trigger decision (it only ever looked at LightGBM and is replaced by T4/T5). `drift_control` keeps the columns, written as NULL.
+- `03_drift_check.run_prediction_drift` is removed (it only ever looked at LightGBM and is replaced by T4/T5); the retrain trigger uses data drift only. `drift_control` keeps its columns: `prediction_drift_detected = false` (the column is non-nullable), the MAE columns NULL.
 
 ### T7 · Naive history in gold (owner decision Q2, §7)
-- One-time notebook `scripts/backfill_017_naive_gold.py` (`dry_run` default): writes `seasonal_naive` gold rows from silver for 2024-01-08 → the first live row, `is_backfilled = true`, `is_served = NULL`, `forecast_run_at = timestamp − 24h`. Seasonal naive uses only `actual(T − 168h)`, known 144h before the forecast would have been issued, so the reconstruction is exact.
+- One-time notebook `scripts/backfill_017_naive_gold.py` (`dry_run` default): writes `seasonal_naive` gold rows from silver for 2024-01-08 → the first live naive row (and never past the last silver hour), `is_backfilled = true`, `is_served = NULL`, `forecast_run_at = timestamp − 48h`. Seasonal naive uses only `actual(T − 168h)`, observed 120h before the forecast would have been issued, so the reconstruction is exact. Insert-only on `forecast_id`.
 - The monitor excludes `is_backfilled` rows from `served` and from alerts; they are used only by the dashboard's history panel.
 
 ### T8 · Dashboard and README
@@ -102,8 +102,8 @@ Live error monitoring with shadow scoring: what is served is recorded per row; n
 
 1. Run `scripts/backfill_017_naive_gold.py` in `dry_run`, review counts, then `execute` (only if Q2 = yes).
 2. Wait for the next hourly run; check that gold has `seasonal_naive` (served) and `energy_lgbm_24h` (shadow) rows for the same target hours.
-3. After 24h, check that `forecast_error_monitor` has rows for all three streams and that `LOW_COVERAGE` has cleared for the 24h window.
-4. After 7 days, review the shadow LightGBM `relative_skill`. That is the input for the promotion review (and for prioritising BUG-02 and BUG-04).
+3. Expect the first `error_monitor` run to fail once with `LOW_COVERAGE` (gold restarted on 2026-10-31, so the 7d window is not yet covered); it does not fail again while the alert persists. After ~2 days, check that `forecast_error_monitor` has rows for all three streams.
+4. After ~8 days `LOW_COVERAGE` clears. Review the shadow LightGBM `relative_skill`. That is the input for the promotion review (and for prioritising BUG-02 and BUG-04).
 
 ## 6. Acceptance criteria
 

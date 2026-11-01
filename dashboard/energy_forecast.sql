@@ -24,15 +24,17 @@ FROM latest_ingest;
 -- ============================================================
 -- QUERY NAME: Actual vs Forecast Line Chart (24h model)
 -- DASHBOARD PANEL: Actual vs Forecast — 24h Model (Last 7 Days)
--- VISUALIZATION: Line chart, one series per model_name
+-- VISUALIZATION: Line chart, one series per `series`
 -- REFRESH: Auto (1 hour)
--- PURPOSE: Visual validation of the served forecast. Seasonal-naive fallback
---          rows (ADR-0002) are shown as their own series, not hidden.
+-- PURPOSE: Visual validation of the served forecast. Seasonal naive is written
+--          every hour and the LightGBM run may be scored in shadow (spec 017),
+--          so each series says whether it was served.
 -- ============================================================
 WITH ranked_forecasts AS (
   SELECT 
     f.timestamp,
     f.model_name,
+    CONCAT(f.model_name, CASE WHEN COALESCE(f.is_served, true) THEN ' (served)' ELSE ' (shadow)' END) AS series,
     f.predicted_mwh,
     f.model_version,
     f.forecast_run_at,
@@ -42,10 +44,12 @@ WITH ranked_forecasts AS (
   LEFT JOIN workspace.energy_forecasting.silver_features s ON f.timestamp = s.timestamp
   WHERE f.horizon_hours = 24 
     AND f.model_name IN ('energy_lgbm_24h', 'seasonal_naive')
+    AND NOT f.is_backfilled
     AND f.timestamp >= current_timestamp() - INTERVAL 7 DAYS
 )
 SELECT 
   timestamp,
+  series,
   model_name,
   actual_mwh,
   predicted_mwh,
@@ -57,31 +61,67 @@ ORDER BY timestamp ASC, model_name ASC;
 
 
 -- ============================================================
--- QUERY NAME: Rolling MAPE Table
--- DASHBOARD PANEL: Forecast Accuracy — Rolling 7-Day MAPE
--- VISUALIZATION: Line chart
+-- QUERY NAME: Live Forecast Error (7-day window)
+-- DASHBOARD PANEL: Forecast Accuracy — Served vs Naive vs Shadow
+-- VISUALIZATION: Line chart of mape by stream; table for skill and alerts
 -- REFRESH: Auto (1 hour)
--- PURPOSE: Tracks model performance degradation or improvement over time.
+-- PURPOSE: Written hourly by 09_error_monitor (spec 017). relative_skill =
+--          1 - model MAPE / naive MAPE on the same target hours (> 0 beats naive).
 -- ============================================================
-WITH daily_metrics AS (
-  SELECT 
-    DATE_TRUNC('week', timestamp) AS week_start,
-    model_name,
-    ABS(actual_mwh - predicted_mwh) / NULLIF(actual_mwh, 0) * 100 AS mape_per_row
-  FROM workspace.energy_forecasting.gold_forecasts
-  WHERE actual_mwh IS NOT NULL
-    AND horizon_hours = 24
-)
-SELECT 
-  week_start,
+SELECT
+  check_timestamp,
+  stream,
   model_name,
-  AVG(mape_per_row) AS weekly_mape,
-  COUNT(*) AS n_observations,
-  5.0 AS target_mape -- 5% benchmark for European load forecasting
-FROM daily_metrics
-GROUP BY 1, 2
+  ROUND(mape, 2) AS mape_7d,
+  ROUND(naive_mape_paired, 2) AS naive_mape_same_hours,
+  ROUND(relative_skill, 3) AS relative_skill,
+  n,
+  ROUND(coverage, 2) AS coverage,
+  ARRAY_JOIN(alerts, ', ') AS alerts
+FROM workspace.energy_forecasting.forecast_error_monitor
+WHERE window_hours = 168
+  AND check_timestamp >= current_timestamp() - INTERVAL 30 DAYS
+ORDER BY check_timestamp ASC, stream ASC;
+
+
+-- ============================================================
+-- QUERY NAME: Active Forecast Error Alerts
+-- DASHBOARD PANEL: Forecast Error Alerts
+-- VISUALIZATION: Counter (alert_count) with the alert list as label
+-- REFRESH: Auto (1 hour)
+-- PURPOSE: Alerts of the latest check (spec 017 T5). A failing alert also
+--          fails the hourly job once, which sends the failure email.
+-- ============================================================
+SELECT
+  check_timestamp,
+  model_name AS served_model,
+  SIZE(alerts) AS alert_count,
+  ARRAY_JOIN(alerts, ', ') AS alerts
+FROM workspace.energy_forecasting.forecast_error_monitor
+WHERE window_hours = 168 AND stream = 'served'
+ORDER BY check_timestamp DESC
+LIMIT 1;
+
+
+-- ============================================================
+-- QUERY NAME: Seasonal-Naive Accuracy History
+-- DASHBOARD PANEL: Seasonal Naive — Weekly MAPE since 2024
+-- VISUALIZATION: Line chart
+-- REFRESH: Auto (1 day)
+-- PURPOSE: The floor every model must beat. Includes the naive history
+--          reconstructed from silver (spec 017 T7, is_backfilled = true).
+-- ============================================================
+SELECT
+  DATE_TRUNC('week', timestamp) AS week_start,
+  AVG(ABS(actual_mwh - predicted_mwh) / NULLIF(actual_mwh, 0) * 100) AS weekly_mape,
+  COUNT(*) AS n_observations
+FROM workspace.energy_forecasting.gold_forecasts
+WHERE model_name = 'seasonal_naive'
+  AND horizon_hours = 24
+  AND actual_mwh IS NOT NULL
+GROUP BY 1
 HAVING n_observations >= 24
-ORDER BY week_start ASC, model_name ASC;
+ORDER BY week_start ASC;
 
 
 -- ============================================================
