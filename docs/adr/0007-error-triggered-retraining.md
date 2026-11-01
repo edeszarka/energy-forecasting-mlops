@@ -12,6 +12,15 @@
 - In the 60 days before 2026-11-01, data drift fired on **every** hourly check, almost always on all non-calendar features at once. A 7-day window against a 30-day reference sees the season change; the trigger carried no information and retrained about daily, limited only by the cooldown.
 - Spec 017 measures the served forecast's live error against seasonal naive on the same hours. That is the quantity a retrain is supposed to improve.
 
+## Data drift, concept drift and what a retrain fixes
+
+- **Data drift (covariate shift):** the input distribution moves but the input–load relationship holds, e.g. autumn cooling or shorter days. A model trained on two years has seen those conditions; retraining adds nothing. The 60 days of "drift" above were this kind.
+- **Concept drift:** the relationship itself changes, e.g. rooftop solar lowering midday net load (the 2211 MW Easter 2025 lows), a large industrial consumer starting or stopping, a price shock. Old patterns go stale; this is what retraining fixes.
+- Concept drift cannot be measured from inputs, only through its consequence: a larger forecast error once actuals arrive. The error trigger is therefore the practical concept-drift detector.
+- It also fires on **covariate shift outside the training range** (record heat, unseen solar capacity), where a retrain on the new data helps too.
+- It can fire on causes a retrain does not fix, such as a data defect (the October 2026 PT15M incident) or poor weather inputs. Enforced data-quality checks stop bad data before silver, the promotion gate keeps a worse model out, and the failure email asks a human to investigate.
+- **Slow concept drift** (solar capacity growing year by year) may never make a model lose to naive for a full day; the weekly retrain on fresh data absorbs it. The error trigger is for sudden changes.
+
 ## Decision
 
 1. `09_error_monitor` triggers retraining when the **served run** is degraded on **its own served hours** (run id in `model_version`): worse than naive on the same hours, or MAPE above the 25% ceiling, on at least 72 own hours in the 7-day window, for 24 consecutive hourly checks.
