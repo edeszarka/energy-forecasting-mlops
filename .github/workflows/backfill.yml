@@ -57,7 +57,10 @@ jobs:
           ENTSO_E_API_KEY: ${{ secrets.ENTSO_E_API_KEY }}
           START_DATE: ${{ inputs.start_date }}
           END_DATE: ${{ inputs.end_date }}
-        run: python -m src.backfill --start "$START_DATE" --end "$END_DATE" --out /tmp/backfill
+        run: |
+          python -m src.backfill --start "$START_DATE" --end "$END_DATE" --out /tmp/backfill
+          # Spec 019: as-issued weather forecasts for the 24h model.
+          python -m src.weather_forecast --start "$START_DATE" --end "$END_DATE" --out /tmp/backfill/weather_forecast
 
       - name: Remove legacy Databricks CLI
         run: |
@@ -69,7 +72,7 @@ jobs:
 
       - name: Upload chunk files to the Volume
         run: |
-          for kind in load temperature; do
+          for kind in load temperature weather_forecast; do
             databricks fs mkdirs "$VOLUME_BACKFILL/$kind"
             count=0
             for f in /tmp/backfill/"$kind"/*.json; do

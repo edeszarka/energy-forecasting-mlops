@@ -42,6 +42,13 @@ resources:
           environment_key: "default"
           timeout_seconds: 1800
 
+        - task_key: "ingest_weather_forecast"
+          # Spec 019: as-issued weather forecasts for the 24h model.
+          notebook_task:
+            notebook_path: ./notebooks/01b_ingest_weather_forecast.py
+          environment_key: "default"
+          timeout_seconds: 900
+
         - task_key: "drift_check"
           depends_on:
             - task_key: "transform"
@@ -53,6 +60,7 @@ resources:
         - task_key: "predict"
           depends_on:
             - task_key: "drift_check"
+            - task_key: "ingest_weather_forecast"
           notebook_task:
             notebook_path: ./notebooks/04_predict.py
           environment_key: "default"
@@ -81,12 +89,6 @@ resources:
           spec:
             environment_version: "5"
       tasks:
-        - task_key: "train_prophet"
-          notebook_task:
-            notebook_path: ./notebooks/05_train_prophet.py
-          environment_key: "default"
-          timeout_seconds: 3600
-
         - task_key: "train_lgbm"
           notebook_task:
             notebook_path: ./notebooks/06_train_lgbm.py
@@ -95,7 +97,6 @@ resources:
 
         - task_key: "evaluate"
           depends_on:
-            - task_key: "train_prophet"
             - task_key: "train_lgbm"
           notebook_task:
             notebook_path: ./notebooks/07_evaluate.py
