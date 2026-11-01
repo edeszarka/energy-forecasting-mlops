@@ -72,8 +72,8 @@ print("version:", __import__("evidently").__version__)
 
 # %% [markdown]
 # # 03_drift_check
-# **Purpose:** Monitor data drift and prediction drift using Evidently AI.
-# **Inputs:** `workspace.energy_forecasting.silver_features`, `workspace.energy_forecasting.gold_forecasts`
+# **Purpose:** Monitor data drift using Evidently AI (forecast error: 09_error_monitor).
+# **Inputs:** `workspace.energy_forecasting.silver_features`
 # **Outputs:** `workspace.energy_forecasting.drift_control`, HTML reports in Volumes.
 # **Last Updated:** 2024-05-21
 #
@@ -139,7 +139,6 @@ dbutils.widgets.text("pending_timeout_hours", "6")
 
 CONFIG = {
     "silver_table": PATHS.table_silver,
-    "forecast_table": PATHS.table_gold,
     "drift_table": PATHS.table_drift,
     "report_base_path": PATHS.volume_reports,
     "flag_path": RETRAIN_FLAG_PATH,
@@ -332,58 +331,7 @@ def run_data_drift(
 
 # COMMAND ----------
 
-# SECTION 5 — PREDICTION DRIFT DETECTION
-# ─────────────────────────────────────────
-
-
-def run_prediction_drift(
-    spark: SparkSession,
-    config: dict,
-    window_start: datetime,
-    window_end: datetime,
-    reference_start: datetime,
-    reference_end: datetime,
-) -> dict[str, Any]:
-    """
-    Computes MAE degradation.
-    """
-
-    def get_mae(start, end):
-        df = (
-            spark.table(config["forecast_table"])
-            .filter(F.col("model_name") == config["primary_model_name"])
-            .filter(F.col("horizon_hours") == 24)
-            .filter(F.col("actual_mwh").isNotNull())
-            .filter(F.col("forecast_run_at").between(start, end))
-        )
-
-        count = df.count()
-        if count < 24:
-            logger.warning(f"Insufficient actuals for window {start}-{end}: {count} rows.")
-            return None
-
-        return df.select(F.mean(F.abs(F.col("predicted_mwh") - F.col("actual_mwh")))).collect()[0][
-            0
-        ]
-
-    mae_current = get_mae(window_start, window_end)
-    mae_reference = get_mae(reference_start, reference_end)
-
-    drift_detected = False
-    if mae_current and mae_reference:
-        # 20% degradation threshold
-        drift_detected = mae_current > (mae_reference * 1.20)
-
-    return {
-        "prediction_drift_detected": drift_detected,
-        "mae_current": mae_current,
-        "mae_reference": mae_reference,
-    }
-
-
-# COMMAND ----------
-
-# SECTION 6 — CONSECUTIVE DRIFT COUNTER
+# SECTION 5 — CONSECUTIVE DRIFT COUNTER
 # ────────────────────────────────────────
 
 
@@ -411,7 +359,7 @@ def get_consecutive_drift_hours(
 
 # COMMAND ----------
 
-# SECTION 7 — RETRAINING TRIGGER
+# SECTION 6 — RETRAINING TRIGGER
 # ─────────────────────────────────
 
 
@@ -471,7 +419,7 @@ def should_trigger_retrain(
 
 # COMMAND ----------
 
-# SECTION 8 — WRITE FLAG FILE
+# SECTION 7 — WRITE FLAG FILE
 # ──────────────────────────────
 
 
@@ -506,7 +454,7 @@ def write_retrain_flag(
 
 # COMMAND ----------
 
-# SECTION 9 — SAVE EVIDENTLY HTML REPORT
+# SECTION 8 — SAVE EVIDENTLY HTML REPORT
 # ─────────────────────────────────────────
 
 
@@ -532,7 +480,7 @@ def save_html_report(report: Report, config: dict, check_time: datetime) -> str:
 
 # COMMAND ----------
 
-# SECTION 10 — MAIN ORCHESTRATION
+# SECTION 9 — MAIN ORCHESTRATION
 # ──────────────────────────────────
 
 mlflow_client = MlflowClient()
@@ -569,9 +517,9 @@ logger.info(f"Loaded current window: {window_start} to {window_end}")
 
 # Run monitoring
 data_drift = run_data_drift(ref_df, curr_df, CONFIG)
-pred_drift = run_prediction_drift(spark, CONFIG, window_start, window_end, ref_start, ref_end)
-
-any_drift = data_drift["dataset_drift"] or pred_drift["prediction_drift_detected"]
+# Forecast error is monitored by 09_error_monitor (spec 017); the old LightGBM-only
+# prediction-MAE check is retired and its drift_control columns are written empty.
+any_drift = bool(data_drift["dataset_drift"])
 consecutive_hours = get_consecutive_drift_hours(spark, CONFIG, check_time, any_drift)
 
 # Trigger Retraining
@@ -613,18 +561,14 @@ result_row = {
     "window_start": window_start,
     "window_end": window_end,
     "data_drift_detected": bool(data_drift["dataset_drift"]),
-    "prediction_drift_detected": bool(pred_drift["prediction_drift_detected"]),
+    "prediction_drift_detected": False,
     "any_drift_detected": bool(any_drift),
     "n_drifted_features": int(data_drift["n_drifted_features"]),
     "drifted_features": ",".join(data_drift["drifted_features"]),
     "drift_score_value_mwh": float(data_drift["drift_score_value_mwh"]),
     "drift_score_temp": float(data_drift["drift_score_temp"]),
-    "prediction_mae_current": float(pred_drift["mae_current"])
-    if pred_drift["mae_current"]
-    else None,
-    "prediction_mae_reference": float(pred_drift["mae_reference"])
-    if pred_drift["mae_reference"]
-    else None,
+    "prediction_mae_current": None,
+    "prediction_mae_reference": None,
     "consecutive_drift_hours": int(consecutive_hours),
     "retrain_triggered": bool(should_retrain),
     "report_path": report_path,
@@ -650,9 +594,6 @@ print(f"""
 │ Drifted features (N):      {data_drift["n_drifted_features"]} ({result_row["drifted_features"]})
 │ value_mwh drift score:     {data_drift["drift_score_value_mwh"]:.4f}
 │ temperature_c drift score:  {data_drift["drift_score_temp"]:.4f}
-│ Prediction drift:          {pred_drift["prediction_drift_detected"]}
-│ MAE current window:        {result_row["prediction_mae_current"] if result_row["prediction_mae_current"] else "N/A"} MWh
-│ MAE reference window:      {result_row["prediction_mae_reference"] if result_row["prediction_mae_reference"] else "N/A"} MWh
 │ Consecutive drift hours:   {consecutive_hours}
 │ Retrain triggered:         {should_retrain} (job run: {retrain_run_id or "N/A"})
 │ Retrain decision:          {retrain_reason}
