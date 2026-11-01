@@ -674,3 +674,12 @@ def test_write_forecasts_leaves_schema_alone_when_is_served_exists():
     write_forecasts(_forecast_frame(), spark, {"forecast_table": "gold"}, is_backfill=False)
 
     assert spark.statements == []
+
+
+def test_ac6_spec018_production_rows_carry_the_run_id():
+    client = _FakeMlflowClient([_run("prod-run", promoted_at="2026-10-21T21:15:08+00:00")])
+
+    result, _ = _serve(client)
+
+    served = result[result["is_served"]]
+    assert set(served["model_version"]) == {"prod-run"}

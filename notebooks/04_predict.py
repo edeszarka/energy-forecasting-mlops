@@ -162,7 +162,7 @@ def load_production_model(model_name: str, mlflow_client: MlflowClient):
     mape = run.data.metrics.get("mape")
     mape_str = f"{mape:.4f}" if mape is not None else "n/a"
     logger.info(f"Loaded {model_name} from Run ID {run_id} (MAPE: {mape_str})")
-    return model, "run_latest", run_id
+    return model, run_id, run_id  # model_version = run id (spec 018 T1)
 
 
 def load_shadow_model(model_name: str, mlflow_client: MlflowClient):
