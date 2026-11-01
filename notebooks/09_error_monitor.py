@@ -38,6 +38,7 @@ dbutils.library.restartPython()
 
 import os
 import sys
+from pathlib import Path  # re-import: restartPython() cleared the first cell
 
 root_path = str(Path(os.getcwd()).parent)
 if root_path not in sys.path:
