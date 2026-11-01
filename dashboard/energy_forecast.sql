@@ -129,7 +129,8 @@ ORDER BY week_start ASC;
 -- DASHBOARD PANEL: Feature Drift Scores — Last 30 Days
 -- VISUALIZATION: Table
 -- REFRESH: Auto (1 hour)
--- PURPOSE: Identifies specific features causing data drift signals.
+-- PURPOSE: Identifies specific features causing data drift signals. Diagnostic
+--          only: since spec 018 data drift never triggers retraining.
 -- ============================================================
 WITH exploded_drift AS (
   SELECT 
