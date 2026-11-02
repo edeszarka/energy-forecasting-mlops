@@ -32,8 +32,17 @@ def _examples(timestamps: pd.Series | pd.Index) -> str:
     return ", ".join(items)
 
 
-def check_hourly_rows(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> list[str]:
-    """No duplicate or off-hour timestamps; 24 hourly rows per complete UTC day in [start, end)."""
+def check_hourly_rows(
+    df: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    settled_before: pd.Timestamp | None = None,
+) -> list[str]:
+    """No duplicate or off-hour timestamps; 24 hourly rows per complete UTC day in [start, end).
+
+    A day counts only if it ended by `settled_before` too. The live path passes
+    it because the newest hours may still be on their way (DQ_DAY_SETTLE_HOURS).
+    """
     ts = df.loc[(df["timestamp"] >= start) & (df["timestamp"] < end), "timestamp"]
     violations = []
 
@@ -51,7 +60,8 @@ def check_hourly_rows(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) 
 
     per_day = ts.drop_duplicates().dt.floor("D").value_counts()
     first_day = start.ceil("D")
-    last_day = end.floor("D") - pd.Timedelta(days=1)
+    days_end = end if settled_before is None else min(end, settled_before)
+    last_day = days_end.floor("D") - pd.Timedelta(days=1)
     if first_day <= last_day:
         days = pd.date_range(first_day, last_day, freq="D")
         short = per_day.reindex(days, fill_value=0)
@@ -131,10 +141,11 @@ def check_load_quality(
     min_mw: float = LOAD_MIN_MW,
     max_mw: float = LOAD_MAX_MW,
     min_corr_24h: float = DQ_MIN_CORR_24H,
+    settled_before: pd.Timestamp | None = None,
 ) -> list[str]:
     """All load checks for the window [start, end); empty list means it passed."""
     return (
-        check_hourly_rows(df, start, end)
+        check_hourly_rows(df, start, end, settled_before)
         + check_value_range(df, start, end, min_mw, max_mw)
         + check_daily_cycle(df, start, end, min_corr_24h)
     )

@@ -166,6 +166,11 @@ LOAD_MAX_MW: Final[float] = 9000.0  # PROVISIONAL
 # stretched 4x (pre-013 parser) give -0.36 to -0.14, the owner's corrupted
 # months 0.02-0.22.
 DQ_MIN_CORR_24H: Final[float] = 0.5  # PROVISIONAL
+# The hourly path counts a UTC day as complete only this long after it ended.
+# Load reaches bronze only when the GitHub cron fires, and its runs were up to
+# 7.6h apart (2026-10-28 to 11-02), so a fresh day can be short without any data
+# being lost. Lookback is 24h, so those hours arrive with the next ingestion.
+DQ_DAY_SETTLE_HOURS: Final[int] = 12
 
 # LIVE ERROR MONITORING (ADR-0006, spec 017)
 # PROVISIONAL for the first month. Seasonal naive (T-168h) on the rebuilt silver,

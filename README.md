@@ -78,7 +78,7 @@ Load data must pass `src/data_quality.py` before it is written ([ADR-0004](docs/
 - non-null values within `[LOAD_MIN_MW, LOAD_MAX_MW]`;
 - a daily cycle: the correlation with the value 24h earlier is at least `DQ_MIN_CORR_24H` and higher than the correlation with the value 12h earlier, on hour-aligned pairs only.
 
-`00_backfill_bronze` always enforces the checks, per calendar month. `02_transform` runs them on the silver frame before writing, controlled by `dq_mode`: `warn` logs violations, `enforce` fails the task and writes nothing. The thresholds in `src/config.py` are provisional until they are calibrated on the rebuilt silver; `databricks.yml` sets `dq_mode: warn` until then.
+`00_backfill_bronze` always enforces the checks, per calendar month. `02_transform` runs them on the silver frame before writing, controlled by `dq_mode`: `warn` logs violations, `enforce` fails the task and writes nothing. `databricks.yml` sets `dq_mode: enforce`. Load reaches bronze only when the GitHub cron fires, so the hourly path counts a UTC day as complete only `DQ_DAY_SETTLE_HOURS` after it ended; the rebuild and the backfill count every complete day. Some thresholds in `src/config.py` are still marked provisional.
 
 ### Reliability Design
 - **Separation of Concerns**: GitHub Actions handles all external connectivity, while Databricks remains an air-gapped environment focused on scalable processing and modeling.
