@@ -56,6 +56,31 @@ def fit_lgbm(
     return model
 
 
+def fit_final_lgbm(
+    train: pd.DataFrame, params: dict[str, Any], features: list[str] = FEATURES
+) -> tuple[lgb.LGBMRegressor, int]:
+    """The served model: tree count from early stopping, then a refit on all of `train`.
+
+    Returns the refitted model and that tree count. The refit has no validation
+    score of its own (spec 020). `train` holds only rows with an actual.
+    """
+    best_iteration = int(fit_lgbm(train, params, features).best_iteration_)
+    model = lgb.LGBMRegressor(**{**params, "n_estimators": best_iteration, "verbose": -1})
+    model.fit(train[features], train["target_mwh"])
+    return model, best_iteration
+
+
+def final_model_tags(train: pd.DataFrame, n_estimators: int) -> dict[str, str]:
+    """Run tags describing what the served model trained on, as target hours (spec 020)."""
+    last_target = train["target_timestamp"].max().isoformat()
+    return {
+        "training_data_start": train["target_timestamp"].min().isoformat(),
+        "training_data_end": last_target,
+        "served_data_end": last_target,
+        "n_estimators_from_validation": str(n_estimators),
+    }
+
+
 def mape(actual: np.ndarray, predicted: np.ndarray) -> float:
     mask = actual != 0
     return float(np.mean(np.abs(actual[mask] - predicted[mask]) / actual[mask]) * 100)

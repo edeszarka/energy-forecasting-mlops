@@ -30,7 +30,9 @@ if root_path not in sys.path:
 # MAGIC    by a model trained only on issuances whose target ends before the month starts. The weekly
 # MAGIC    naive (T − 168h, the served fallback) and the daily naive (T − 48h) are scored on the same
 # MAGIC    rows. The logged `mape` and `naive_mape` come from this backtest.
-# MAGIC 2. **Final model** trained on all rows (early stopping on the last 28 days) and logged.
+# MAGIC 2. **Served model:** early stopping on the last 28 days gives the tree count, then a refit
+# MAGIC    with that count on all rows with an actual (spec 020). The refit has no validation score
+# MAGIC    of its own: `mape` describes the backtest's fold models, not this model.
 # MAGIC
 # MAGIC Optuna tuning is off by default (`n_trials = 0`): the default parameters beat the weekly
 # MAGIC naive by 55% in the spec 019 backtest. With `n_trials > 0` it tunes only on rows before the
@@ -50,7 +52,8 @@ import pandas as pd
 
 from src.backtest import (
     PURGE,
-    fit_lgbm,
+    final_model_tags,
+    fit_final_lgbm,
     monthly_folds,
     monthly_table,
     rolling_origin_backtest,
@@ -101,13 +104,6 @@ def read_inputs(spark) -> tuple[pd.DataFrame, pd.DataFrame]:
     return load, weather
 
 
-def issuance_hours(load: pd.DataFrame, weather: pd.DataFrame) -> pd.DatetimeIndex:
-    """Every hour with a possible actual: from when both sources exist to the last target."""
-    first = max(load["timestamp"].min(), weather["timestamp"].min()).tz_localize(None)
-    last = load["timestamp"].max().tz_localize(None) - pd.Timedelta(hours=FORECAST_HORIZON_HOURS)
-    return pd.date_range(first.ceil("h"), last, freq="h")
-
-
 def tune(data: pd.DataFrame, n_trials: int) -> dict:
     """Optuna on rows whose targets end before the backtest window (no peeking)."""
     folds = monthly_folds(data.dropna(subset=["target_mwh"]).index, CONFIG["backtest_months"])
@@ -116,6 +112,13 @@ def tune(data: pd.DataFrame, n_trials: int) -> dict:
     return run_lgbm_tuning(
         train[FEATURES], train["target_mwh"], FORECAST_HORIZON_HOURS, n_trials=n_trials
     )
+
+
+def issuance_hours(load: pd.DataFrame, weather: pd.DataFrame) -> pd.DatetimeIndex:
+    """Every hour with a possible actual: from when both sources exist to the last target."""
+    first = max(load["timestamp"].min(), weather["timestamp"].min()).tz_localize(None)
+    last = load["timestamp"].max().tz_localize(None) - pd.Timedelta(hours=FORECAST_HORIZON_HOURS)
+    return pd.date_range(first.ceil("h"), last, freq="h")
 
 
 # COMMAND ----------
@@ -147,9 +150,9 @@ with (
     print(table.round(2).to_string(index=False))
 
     train = data.dropna(subset=["target_mwh"])
-    model = fit_lgbm(train, params)
+    model, best_iteration = fit_final_lgbm(train, params)
 
-    mlflow.log_params({**params, "best_iteration": model.best_iteration_})
+    mlflow.log_params({**params, "best_iteration": best_iteration})
     mlflow.log_param("backtest_months", CONFIG["backtest_months"])
     mlflow.log_metrics(
         {
@@ -195,10 +198,7 @@ with (
             "leak_affected": "false",
             "data_version": data_version,
             "feature_set": FEATURE_SET,
-            "training_data_start": train.index.min().isoformat(),
-            "training_data_end": train.index.max().isoformat(),
-            # The final model's early stopping saw the last targets (spec 011 §1.6).
-            "served_data_end": train["target_timestamp"].max().isoformat(),
+            **final_model_tags(train, best_iteration),
         }
     )
     mlflow.lightgbm.log_model(model, artifact_path="model")

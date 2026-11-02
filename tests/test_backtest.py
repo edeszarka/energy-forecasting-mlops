@@ -1,5 +1,8 @@
 """Rolling-origin backtest: purge, folds, same-row scoring (spec 019 AC2, AC3)."""
 
+from datetime import datetime
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -84,6 +87,101 @@ def test_summary_and_monthly_table(data):
     assert summary["n_rows"] == len(rows)
     assert list(table["fold"]) == ["2025-06", "2025-07"]
     assert table["n"].sum() == len(rows)
+
+
+# --- Spec 020: the served model trains on all rows --------------------------------
+
+
+@pytest.fixture()
+def train(data):
+    return data.dropna(subset=["target_mwh"])
+
+
+def _record_fits(monkeypatch) -> list[pd.DataFrame]:
+    fits = []
+    real_fit = bt.lgb.LGBMRegressor.fit
+
+    def spy(self, X, y, **kwargs):
+        fits.append(X)
+        return real_fit(self, X, y, **kwargs)
+
+    monkeypatch.setattr(bt.lgb.LGBMRegressor, "fit", spy)
+    return fits
+
+
+def test_ac1_served_model_fit_rows_reach_the_last_target(train, monkeypatch):
+    fits = _record_fits(monkeypatch)
+
+    bt.fit_final_lgbm(train, PARAMS)
+
+    early_stopping, refit = fits
+    pd.testing.assert_index_equal(refit.index, train.index)
+    assert train.loc[refit.index.max(), "target_timestamp"] == train["target_timestamp"].max()
+    assert early_stopping.index.max() < refit.index.max() - pd.Timedelta(days=28)
+
+
+def test_ac2_tree_count_equals_the_validation_result(train):
+    expected = bt.fit_lgbm(train, PARAMS).best_iteration_
+
+    model, best_iteration = bt.fit_final_lgbm(train, PARAMS)
+
+    assert best_iteration == expected
+    assert model.booster_.num_trees() == expected
+
+
+def test_ac3_backtest_folds_are_unchanged(data, monkeypatch):
+    fold_rows = data.dropna(subset=["target_mwh", bt.WEEKLY_NAIVE, bt.DAILY_NAIVE])
+    folds = bt.monthly_folds(fold_rows.index, 2)
+    assert folds == [
+        (pd.Timestamp("2025-06-01"), pd.Timestamp("2025-07-01")),
+        (pd.Timestamp("2025-07-01"), pd.Timestamp("2025-08-01")),
+    ]
+
+    def no_refit(*args, **kwargs):
+        raise AssertionError("A backtest fold must not use the refit.")
+
+    monkeypatch.setattr(bt, "fit_final_lgbm", no_refit)
+    rows = bt.rolling_origin_backtest(data, PARAMS, n_months=2)
+
+    train = data.dropna(subset=["target_mwh"])
+    for start, end in folds:
+        model = bt.fit_lgbm(train[train.index < start - bt.PURGE], PARAMS)
+        test = fold_rows[(fold_rows.index >= start) & (fold_rows.index < end)]
+        np.testing.assert_array_equal(
+            rows.loc[rows["fold"] == start.strftime("%Y-%m"), "predicted"],
+            model.predict(test[bt.FEATURES]),
+        )
+
+
+def test_ac4_tags_state_what_was_trained(train):
+    tags = bt.final_model_tags(train, 123)
+
+    last_target = train["target_timestamp"].max().isoformat()
+    assert tags == {
+        "training_data_start": train["target_timestamp"].min().isoformat(),
+        "training_data_end": last_target,
+        "served_data_end": last_target,
+        "n_estimators_from_validation": "123",
+    }
+
+
+def test_ac4_tags_are_target_hours_the_drift_reference_window_can_read(train):
+    tags = bt.final_model_tags(train, 123)
+
+    # 03_drift_check reads both tags with datetime.fromisoformat, then filters silver on them.
+    start = datetime.fromisoformat(tags["training_data_start"])
+    end = datetime.fromisoformat(tags["training_data_end"])
+    assert start.tzinfo is None and end.tzinfo is None
+    assert start == train.index.min() + bt.PURGE
+    assert end == train.index.max() + bt.PURGE
+
+
+def test_ac4_training_notebook_logs_the_refit_and_its_tags():
+    source = (Path(__file__).parents[1] / "notebooks/06_train_lgbm.py").read_text(encoding="utf-8")
+
+    assert "model, best_iteration = fit_final_lgbm(train, params)" in source
+    assert "**final_model_tags(train, best_iteration)," in source
+    assert "fit_lgbm(" not in source
 
 
 def test_mape_ignores_zero_actuals_and_empty_summary_raises():
