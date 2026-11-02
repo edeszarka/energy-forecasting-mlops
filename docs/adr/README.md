@@ -14,3 +14,4 @@ Format: `NNNN-short-title.md`. Statuses: Proposed, Accepted, Superseded by ADR-N
 | [0006](0006-live-error-monitoring-and-shadow-scoring.md) | Live error monitoring against naive, with shadow scoring | Accepted | 017 |
 | [0007](0007-error-triggered-retraining.md) | Retraining triggered by forecast error; data drift diagnostic only | Accepted | 018 |
 | [0008](0008-point-in-time-features-and-24h-target.md) | Point-in-time features and a true 24h-ahead target | Accepted | 019 |
+| [0009](0009-promotion-gate-as-of-proxy.md) | Promotion gate with an as-of proxy and non-inferiority | Accepted | 021 |

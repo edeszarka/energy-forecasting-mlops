@@ -1,9 +1,10 @@
-"""Champion/challenger comparison and promotion decision logic (spec 011).
+"""Champion/challenger comparison and promotion decision logic (spec 021, ADR-0009).
 
-The champion and challenger must be scored on the SAME rows: each run's
-logged `mape` comes from its own holdout window, and after drift a newer
-window is usually harder, so comparing logged metrics would bias the decision
-towards keeping a stale champion (or promoting a worse challenger).
+The challenger's refit trained on every row after the champion's cutoff, so it
+cannot be scored there. Instead an as-of model, built by the challenger's code on
+the rows up to the cutoff, is compared with the champion on the rows after it:
+same data age, same rows, both out-of-sample. Metrics from different windows are
+never compared.
 """
 
 from __future__ import annotations
@@ -16,13 +17,14 @@ import pandas as pd
 
 from src.config import PROMOTABLE_MODELS
 
-# Name of the per-row backtest artifact logged by 05/06 and read by 07.
+# Per-row backtest logged by 06, for audit.
 BACKTEST_ARTIFACT: str = "backtest_predictions.json"
+# Parameters logged by 06, with their real types; 07 trains the as-of model with them.
+TRAINING_PARAMS_ARTIFACT: str = "training_params.json"
 
 BENCHMARK_ONLY_REASON: str = "Benchmark-only model (ADR-0002) — never promoted."
 
-# Minimum number of shared out-of-sample rows needed for a same-window
-# comparison. Prophet's rolling-origin backtest only has n_folds targets.
+# Fewer rows after the champion's cutoff than this: no comparison, the champion stays.
 MIN_COMMON_ROWS: dict[str, int] = {"lgbm": 24}
 
 
@@ -74,43 +76,68 @@ def served_data_end(run: Any) -> pd.Timestamp:
     return to_naive_utc(datetime.fromtimestamp(run.info.start_time / 1000.0, tz=UTC))
 
 
-def select_common_window(backtest: pd.DataFrame, champion_end: Any) -> pd.DataFrame:
-    """Keeps backtest rows whose TARGET is out-of-sample for the champion too."""
-    targets = pd.to_datetime(backtest["target_timestamp"]).map(to_naive_utc)
-    return backtest[targets > to_naive_utc(champion_end)].reset_index(drop=True)
+def _target_hours(rows: pd.DataFrame) -> pd.Series:
+    return pd.to_datetime(rows["target_timestamp"]).map(to_naive_utc)
 
 
-def decide_promotion(
+def as_of_train_rows(train: pd.DataFrame, cutoff: Any) -> pd.DataFrame:
+    """Rows the as-of model may train on: a target at or before the champion's cutoff."""
+    return train[_target_hours(train) <= to_naive_utc(cutoff)]
+
+
+def select_as_of_window(rows: pd.DataFrame, cutoff: Any) -> pd.DataFrame:
+    """The common window: a target after the cutoff, so neither model trained on it."""
+    return rows[_target_hours(rows) > to_naive_utc(cutoff)]
+
+
+def decide_as_of_promotion(
     champion_mape: float | None,
+    as_of_mape: float | None,
     challenger_mape: float | None,
-    threshold: float,
+    naive_mape: float | None,
+    n_common: int,
+    delta: float,
     first_run: bool,
     force: bool = False,
-    challenger_naive_mape: float | None = None,
 ) -> tuple[bool, str]:
-    """Champion/challenger rule: promote only on > `threshold` relative MAPE gain.
+    """Promotes when (a) as-of <= champion * (1 + delta) and (b) challenger < naive.
 
-    When the challenger is not clearly better, the champion stays and nothing
-    changes in production. Without a champion (`first_run`) the challenger must
-    beat the naive baseline logged on its own test rows (`challenger_naive_mape`),
-    otherwise serving stays on seasonal naive (spec 014 T7).
+    `challenger_mape` and `naive_mape` are the challenger's logged backtest metrics;
+    the other two are scored on the common window. Without a champion only (b)
+    counts (spec 014 T7). Too few common rows or an invalid metric keep the champion.
     """
     if force:
         return True, "Force promotion requested via widget"
     if first_run:
-        return _decide_first_run(challenger_mape, challenger_naive_mape)
-    if challenger_mape is None or pd.isna(challenger_mape):
-        return False, "Invalid challenger metrics — keeping champion"
-    if champion_mape is None or pd.isna(champion_mape) or champion_mape <= 0:
-        return False, "Invalid champion metrics — keeping champion"
+        return _decide_first_run(challenger_mape, naive_mape)
 
-    improvement = (champion_mape - challenger_mape) / champion_mape
-    if improvement > threshold:
-        return True, (
-            f"MAPE improved by {improvement:.2%} ({champion_mape:.3f}% -> {challenger_mape:.3f}%)"
+    min_rows = MIN_COMMON_ROWS["lgbm"]
+    if n_common < min_rows:
+        return False, f"Only {n_common} common rows (need {min_rows}). Keeping champion."
+    if as_of_mape is None or pd.isna(as_of_mape):
+        return False, "Invalid as-of metric. Keeping champion."
+    if champion_mape is None or pd.isna(champion_mape) or champion_mape <= 0:
+        return False, "Invalid champion metric. Keeping champion."
+    if challenger_mape is None or pd.isna(challenger_mape):
+        return False, "Invalid challenger backtest metric. Keeping champion."
+    if naive_mape is None or pd.isna(naive_mape):
+        return False, "Invalid naive metric. Keeping champion."
+
+    limit = champion_mape * (1 + delta)
+    if as_of_mape > limit:
+        return False, (
+            f"As-of model is worse than the limit ({as_of_mape:.3f}% > {limit:.3f}%, "
+            f"champion {champion_mape:.3f}%). Keeping champion."
         )
-    return False, (
-        f"Insufficient improvement ({improvement:.2%} <= {threshold:.2%}). Keeping champion."
+    if challenger_mape >= naive_mape:
+        return False, (
+            f"Challenger does not beat naive ({challenger_mape:.3f}% >= {naive_mape:.3f}%). "
+            "Keeping champion."
+        )
+    return True, (
+        f"As-of model within the limit ({as_of_mape:.3f}% <= {limit:.3f}%, "
+        f"champion {champion_mape:.3f}%) and challenger beats naive "
+        f"({challenger_mape:.3f}% < {naive_mape:.3f}%)"
     )
 
 
@@ -142,7 +169,7 @@ def is_promotable(model_name: str) -> bool:
 def apply_benchmark_policy(model_name: str, challenger_wins: bool, reason: str) -> tuple[bool, str]:
     """Overrides a promotion decision for benchmark-only models.
 
-    Applied after decide_promotion, so it also covers first_run and force: the
+    Applied after decide_as_of_promotion, so it also covers first_run and force: the
     comparison is still computed and reported, but a benchmark never wins.
     """
     if is_promotable(model_name):

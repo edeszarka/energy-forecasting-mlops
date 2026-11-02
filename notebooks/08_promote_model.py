@@ -62,7 +62,6 @@ from src.promotion import BENCHMARK_ONLY_REASON, is_promotable, pick_production_
 # SECTION 1 — SETUP AND CONFIG
 # ─────────────────────────────
 
-dbutils.widgets.text("mape_improvement_threshold", "0.01")
 dbutils.widgets.text("dry_run", "false")
 dbutils.widgets.text("force_promote", "false")
 
@@ -70,7 +69,6 @@ CONFIG = {
     "eval_table": PATHS.table_eval,
     "promotion_log_table": PATHS.table_promotion,
     "flag_path": RETRAIN_FLAG_PATH,
-    "mape_threshold": float(dbutils.widgets.get("mape_improvement_threshold")),
     "dry_run": dbutils.widgets.get("dry_run").lower() == "true",
     "force_promote": dbutils.widgets.get("force_promote").lower() == "true",
 }
@@ -141,8 +139,8 @@ def decide_promotions(
     eval_df: pd.DataFrame, mlflow_client: MlflowClient, config: dict
 ) -> list[dict]:
     """
-    Acts on 07_evaluate's same-window champion/challenger decision. If 07 found the
-    champion better, nothing changes in production.
+    Acts on 07_evaluate's promotion gate (spec 021). If the gate keeps the champion,
+    nothing changes in production.
     """
     decisions = []
 
