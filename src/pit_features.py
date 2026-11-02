@@ -180,6 +180,16 @@ def build_features(
     return out[["target_timestamp", *FEATURES] + (["target_mwh"] if include_target else [])]
 
 
+def issuance_hours(load: pd.DataFrame, weather: pd.DataFrame) -> pd.DatetimeIndex:
+    """Every hour with a possible actual: from when both sources exist to the last target.
+
+    Both frames have a tz-aware UTC `timestamp` column.
+    """
+    first = max(load["timestamp"].min(), weather["timestamp"].min()).tz_localize(None)
+    last = load["timestamp"].max().tz_localize(None) - pd.Timedelta(hours=FORECAST_HORIZON_HOURS)
+    return pd.date_range(first.ceil("h"), last, freq="h")
+
+
 def weather_frame_from_api(hourly: dict[str, list]) -> pd.DataFrame:
     """Previous Runs API `hourly` JSON block -> `timestamp` + WEATHER_COLUMNS."""
     frame = pd.DataFrame({"timestamp": pd.to_datetime(hourly["time"], utc=True)})

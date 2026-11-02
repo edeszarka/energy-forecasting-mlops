@@ -172,6 +172,10 @@ DQ_MIN_CORR_24H: Final[float] = 0.5  # PROVISIONAL
 # being lost. Lookback is 24h, so those hours arrive with the next ingestion.
 DQ_DAY_SETTLE_HOURS: Final[int] = 12
 
+# PROMOTION GATE (ADR-0009, spec 021)
+# The as-of model may be this much worse than the champion, relatively. PROVISIONAL.
+PROMOTION_NON_INFERIORITY_DELTA: Final[float] = 0.02
+
 # LIVE ERROR MONITORING (ADR-0006, spec 017)
 # PROVISIONAL for the first month. Seasonal naive (T-168h) on the rebuilt silver,
 # 2024-01 -> 2026-10: weekly MAPE median 7.28%, p90 13.21%, p95 15.69%, max 22.53%

@@ -61,8 +61,8 @@ from src.backtest import (
 )
 from src.config import CATALOG, FEATURE_SET, LGBM_PARAMS, PATHS
 from src.data_version import read_data_version, table_properties
-from src.pit_features import FEATURES, FORECAST_HORIZON_HOURS, build_features
-from src.promotion import BACKTEST_ARTIFACT
+from src.pit_features import FEATURES, FORECAST_HORIZON_HOURS, build_features, issuance_hours
+from src.promotion import BACKTEST_ARTIFACT, TRAINING_PARAMS_ARTIFACT
 from src.tuning import run_lgbm_tuning
 
 dbutils.widgets.text("backtest_months", "12")
@@ -114,13 +114,6 @@ def tune(data: pd.DataFrame, n_trials: int) -> dict:
     )
 
 
-def issuance_hours(load: pd.DataFrame, weather: pd.DataFrame) -> pd.DatetimeIndex:
-    """Every hour with a possible actual: from when both sources exist to the last target."""
-    first = max(load["timestamp"].min(), weather["timestamp"].min()).tz_localize(None)
-    last = load["timestamp"].max().tz_localize(None) - pd.Timedelta(hours=FORECAST_HORIZON_HOURS)
-    return pd.date_range(first.ceil("h"), last, freq="h")
-
-
 # COMMAND ----------
 
 spark.sql(f"USE CATALOG {CATALOG}")
@@ -154,9 +147,11 @@ with (
 
     mlflow.log_params({**params, "best_iteration": best_iteration})
     mlflow.log_param("backtest_months", CONFIG["backtest_months"])
+    # 07_evaluate trains the as-of model with exactly these (spec 021).
+    mlflow.log_dict(params, TRAINING_PARAMS_ARTIFACT)
     mlflow.log_metrics(
         {
-            # `mape` and `naive_mape` are what 07/08 compare (first run: model vs naive).
+            # `mape` < `naive_mape` is condition (b) of the promotion gate (spec 021).
             "mape": summary["lgbm_mape"],
             "mae": summary["lgbm_mae"],
             "rmse": summary["lgbm_rmse"],
@@ -179,8 +174,7 @@ with (
         ),
         "feature_importance_gain.json",
     )
-    # Per-row backtest: 07_evaluate scores the champion on the same rows
-    # (spec 011 §1.3). `timestamp` is the issuance hour.
+    # Per-row backtest, for audit. `timestamp` is the issuance hour.
     mlflow.log_dict(
         {
             "timestamp": [pd.Timestamp(t).isoformat() for t in rows["issued_at"]],

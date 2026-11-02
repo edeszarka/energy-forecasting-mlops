@@ -21,10 +21,12 @@ if root_path not in sys.path:
 
 # %% [markdown]
 # # 07_evaluate
-# **Purpose:** Compare new Challenger models against the current Production run, scoring
-# both on the same out-of-sample rows (spec 011), with the champion's inputs built by the
-# same point-in-time feature function as training and serving (spec 019).
-# **Inputs:** MLflow runs + `backtest_predictions.json` artifacts, `silver_features` (load),
+# **Purpose:** The promotion gate (spec 021, ADR-0009). An as-of model, built by the
+# challenger's code on the rows up to the champion's cutoff, is compared with the champion on
+# the rows after it, both on the same point-in-time features as training and serving
+# (spec 019). Promote if the as-of model is within PROMOTION_NON_INFERIORITY_DELTA of the
+# champion and the challenger's backtest beats naive. This tests the procedure, not the data.
+# **Inputs:** MLflow runs + `training_params.json` artifacts, `silver_features` (load),
 # `bronze_weather_forecast`
 # **Outputs:** `workspace.energy_forecasting.model_evaluation` Delta table
 
@@ -46,31 +48,30 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
+from src.backtest import fit_final_lgbm
 from src.config import (
     CATALOG,
     CURRENT_RUN_FILTER,
     EVALUATED_MODELS,
     PATHS,
+    PROMOTION_NON_INFERIORITY_DELTA,
     SCHEMA,
 )
-from src.pit_features import FEATURES, build_features
+from src.pit_features import FEATURES, build_features, issuance_hours
 from src.promotion import (
-    BACKTEST_ARTIFACT,
     MIN_COMMON_ROWS,
+    TRAINING_PARAMS_ARTIFACT,
     apply_benchmark_policy,
+    as_of_train_rows,
     calculate_mape,
-    decide_promotion,
+    decide_as_of_promotion,
     is_promotable,
     pick_production_run,
-    select_common_window,
+    select_as_of_window,
     served_data_end,
-    to_naive_utc,
 )
 
 # COMMAND ----------
-
-dbutils.widgets.text("mape_improvement_threshold", "0.01")
-THRESHOLD = float(dbutils.widgets.get("mape_improvement_threshold"))
 
 CONFIG = {
     "eval_table": PATHS.table_eval,
@@ -117,19 +118,6 @@ def get_champion_run(model_name: str, challenger_run_id: str):
     return pick_production_run(runs, exclude_run_id=challenger_run_id)
 
 
-def load_backtest(run) -> pd.DataFrame | None:
-    """Per-row backtest predictions logged by 05/06 (None for pre-spec-011 runs)."""
-    try:
-        data = mlflow.artifacts.load_dict(f"runs:/{run.info.run_id}/{BACKTEST_ARTIFACT}")
-    except Exception as e:
-        logger.warning(f"No backtest artifact on run {run.info.run_id}: {e}")
-        return None
-    df = pd.DataFrame(data)
-    df["timestamp"] = pd.to_datetime(df["timestamp"]).map(to_naive_utc)
-    df["target_timestamp"] = pd.to_datetime(df["target_timestamp"]).map(to_naive_utc)
-    return df
-
-
 _INPUT_CACHE: dict[str, pd.DataFrame] = {}
 
 
@@ -138,62 +126,57 @@ def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame]:
     if not _INPUT_CACHE:
         load = spark.read.table(CONFIG["silver_table"]).select("timestamp", "value_mwh").toPandas()
         weather = spark.read.table(CONFIG["weather_table"]).toPandas()
+        for frame in (load, weather):
+            frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
         _INPUT_CACHE.update(load=load, weather=weather)
     return _INPUT_CACHE["load"], _INPUT_CACHE["weather"]
 
 
-def predict_with_champion(champion, model_name: str, horizon: int, rows: pd.DataFrame) -> pd.Series:
-    """Scores the champion's served model on exactly the challenger's backtest rows
-    (`timestamp` = issuance hour), on the same point-in-time features (spec 019)."""
-    model = mlflow.lightgbm.load_model(f"runs:/{champion.info.run_id}/model")
-    if list(model.booster_.feature_name()) != list(FEATURES):
-        raise ValueError(f"Champion {champion.info.run_id} was trained on other features.")
+def score_as_of(challenger, champion) -> dict:
+    """As-of model and champion on the rows after the champion's cutoff (spec 021)."""
+    cutoff = served_data_end(champion)
     load, weather = load_inputs()
-    feats = build_features(load, weather, rows["timestamp"], include_target=False)
-    return pd.Series(model.predict(feats[FEATURES]), index=rows.index)
+    data = build_features(load, weather, issuance_hours(load, weather))
+    data = data.dropna(subset=["target_mwh"])
+    common = select_as_of_window(data, cutoff)
+    if len(common) < MIN_COMMON_ROWS["lgbm"]:
+        return {
+            "as_of_mape": None,
+            "champion_mape": None,
+            "comparison_method": "insufficient_common_rows",
+            "n_common_rows": len(common),
+        }
 
+    run_id = challenger.info.run_id
+    params = mlflow.artifacts.load_dict(f"runs:/{run_id}/{TRAINING_PARAMS_ARTIFACT}")
+    as_of_model, _ = fit_final_lgbm(as_of_train_rows(data, cutoff), params)
 
-def compare_on_common_window(challenger, champion, model_name: str, horizon: int) -> dict:
-    """Same-window MAPE for both models. Falls back to each run's logged metric only
-    when too few rows are out-of-sample for BOTH models (e.g. pre-spec-011 runs)."""
-    logged = {
-        "challenger_mape": challenger.data.metrics.get("mape"),
-        "champion_mape": champion.data.metrics.get("mape"),
-        "comparison_method": "logged_metrics",
-        "n_common_rows": 0,
-    }
-
-    backtest = load_backtest(challenger)
-    if backtest is None:
-        return logged
-
-    family = "lgbm"
-    common = select_common_window(backtest, served_data_end(champion))
-    if len(common) < MIN_COMMON_ROWS[family]:
-        logger.warning(
-            f"{model_name}: only {len(common)} backtest rows are out-of-sample for the "
-            f"champion (need {MIN_COMMON_ROWS[family]}). Falling back to logged metrics."
-        )
-        return logged
-
-    try:
-        champion_pred = predict_with_champion(champion, model_name, horizon, common)
-    except ValueError as e:
-        logger.warning(f"{model_name}: champion cannot be scored on the common rows: {e}")
-        return logged
-    valid = champion_pred.notna() & common["actual"].notna()
-    if valid.sum() < MIN_COMMON_ROWS[family]:
-        logger.warning(f"{model_name}: champion could only score {valid.sum()} common rows.")
-        return logged
+    champion_model = mlflow.lightgbm.load_model(f"runs:/{champion.info.run_id}/model")
+    if list(champion_model.booster_.feature_name()) != list(FEATURES):
+        raise ValueError(f"Champion {champion.info.run_id} was trained on other features.")
 
     return {
-        "challenger_mape": calculate_mape(
-            common.loc[valid, "actual"], common.loc[valid, "predicted"]
+        "as_of_mape": calculate_mape(common["target_mwh"], as_of_model.predict(common[FEATURES])),
+        "champion_mape": calculate_mape(
+            common["target_mwh"], champion_model.predict(common[FEATURES])
         ),
-        "champion_mape": calculate_mape(common.loc[valid, "actual"], champion_pred[valid]),
-        "comparison_method": "same_window",
-        "n_common_rows": int(valid.sum()),
+        "comparison_method": "as_of",
+        "n_common_rows": len(common),
     }
+
+
+def compare_as_of(challenger, champion, model_name: str) -> dict:
+    """score_as_of, except that any failure leaves no result, so the champion stays."""
+    try:
+        return score_as_of(challenger, champion)
+    except Exception as e:
+        logger.warning(f"{model_name}: as-of comparison failed, keeping the champion: {e}")
+        return {
+            "as_of_mape": None,
+            "champion_mape": None,
+            "comparison_method": "not_scored",
+            "n_common_rows": 0,
+        }
 
 
 # COMMAND ----------
@@ -221,22 +204,22 @@ for name in EVALUATED_MODELS:
 
     if first_run:
         comparison = {
-            "challenger_mape": challenger.data.metrics.get("mape"),
+            "as_of_mape": None,
             "champion_mape": None,
             "comparison_method": "first_run",
             "n_common_rows": 0,
         }
     else:
-        comparison = compare_on_common_window(challenger, champion, name, horizon)
+        comparison = compare_as_of(challenger, champion, name)
 
-    # Without a champion the challenger must beat the naive baseline logged on
-    # its own test rows (spec 014 T7).
-    challenger_wins, decision_reason = decide_promotion(
+    challenger_wins, decision_reason = decide_as_of_promotion(
         comparison["champion_mape"],
-        comparison["challenger_mape"],
-        THRESHOLD,
+        comparison["as_of_mape"],
+        challenger.data.metrics.get("mape"),
+        challenger.data.metrics.get("naive_mape"),
+        comparison["n_common_rows"],
+        PROMOTION_NON_INFERIORITY_DELTA,
         first_run,
-        challenger_naive_mape=challenger.data.metrics.get("naive_mape"),
     )
     challenger_wins, decision_reason = apply_benchmark_policy(
         name, challenger_wins, decision_reason
@@ -257,7 +240,10 @@ for name in EVALUATED_MODELS:
             "challenger_run_id": challenger.info.run_id,
             "challenger_mae": metrics.get("mae"),
             "challenger_rmse": metrics.get("rmse"),
-            "challenger_mape": comparison["challenger_mape"],
+            # The as-of model on the common window; otherwise the logged backtest (spec 021).
+            "challenger_mape": comparison["as_of_mape"]
+            if comparison["comparison_method"] == "as_of"
+            else metrics.get("mape"),
             "baseline_mae": metrics.get("naive_mae"),
             "baseline_rmse": metrics.get("naive_rmse"),
             "baseline_mape": baseline_mape,
@@ -331,8 +317,8 @@ print(
 
 for _, row in pdf[pdf["beats_baseline"].eq(False)].iterrows():
     print(
-        f"WARNING: {row['model_name']} does NOT beat the naive baseline "
-        f"(model {row['challenger_mape']:.2f}% vs baseline {row['baseline_mape']:.2f}%)."
+        f"WARNING: {row['model_name']}'s backtest does NOT beat the naive baseline "
+        f"({row['baseline_mape']:.2f}%)."
     )
 
 print("\nFinal Recommendations:")
