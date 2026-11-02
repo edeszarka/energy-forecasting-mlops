@@ -109,6 +109,7 @@ from src.bronze_write import replace_where_predicate
 from src.config import (
     CATALOG,
     CURRENT_DATA_VERSION,
+    DQ_DAY_SETTLE_HOURS,
     ENTSO_E_ZONE,
     LAG_HOURS,
     MIN_TRAINING_ROWS,
@@ -388,8 +389,12 @@ logger.info(f"Feature matrix (core window): {feature_pd.shape}")
 
 # Data-quality checks on the core window (ADR-0004): `enforce` raises here,
 # before the MERGE, so nothing is written.
+dq_end = pd.Timestamp(window_end) + pd.Timedelta(hours=1)
 dq_violations = check_load_quality(
-    feature_pd, core_start, pd.Timestamp(window_end) + pd.Timedelta(hours=1)
+    feature_pd,
+    core_start,
+    dq_end,
+    settled_before=dq_end - pd.Timedelta(hours=DQ_DAY_SETTLE_HOURS),
 )
 apply_dq_mode(dq_violations, dq_mode)
 

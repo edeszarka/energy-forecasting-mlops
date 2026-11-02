@@ -83,6 +83,52 @@ def test_partial_days_at_window_edges_are_not_counted():
     assert check_hourly_rows(df, *window(df)) == []
 
 
+INCIDENT_START = pd.Timestamp("2026-10-19T00:00Z")
+
+
+def incident_load() -> pd.DataFrame:
+    """Live bronze on 2026-11-01 23:05 UTC: the last ingestion had stopped at 20:00."""
+    df = clean_load(days=14, start=INCIDENT_START)
+    return df[df["timestamp"] <= pd.Timestamp("2026-11-01T20:00Z")]
+
+
+@pytest.mark.parametrize(
+    "run_hour", ["2026-11-01T23:00Z", "2026-11-02T00:00Z", "2026-11-02T10:00Z"]
+)
+def test_unsettled_day_with_late_hours_passes(run_hour):
+    end = pd.Timestamp(run_hour) + pd.Timedelta(hours=1)
+
+    violations = check_hourly_rows(
+        incident_load(), INCIDENT_START, end, settled_before=end - pd.Timedelta(hours=12)
+    )
+
+    assert violations == []
+
+
+def test_settled_day_still_short_fails():
+    end = pd.Timestamp("2026-11-02T12:00Z")
+
+    violations = check_hourly_rows(
+        incident_load(), INCIDENT_START, end, settled_before=end - pd.Timedelta(hours=12)
+    )
+
+    assert violations == ["1 complete days without 24 hourly rows (2026-11-01: 21)"]
+
+
+def test_without_settled_before_every_complete_day_counts():
+    end = pd.Timestamp("2026-11-02T00:00Z")
+    violations = check_hourly_rows(incident_load(), INCIDENT_START, end)
+    assert violations == ["1 complete days without 24 hourly rows (2026-11-01: 21)"]
+
+
+def test_settled_before_passes_through_check_load_quality():
+    df = clean_load().drop(index=len(clean_load()) - 1)
+    start, end = df["timestamp"].min(), df["timestamp"].max() + pd.Timedelta(hours=2)
+
+    assert any("complete days" in v for v in check_load_quality(df, start, end))
+    assert check_load_quality(df, start, end, settled_before=end - pd.Timedelta(hours=12)) == []
+
+
 def test_out_of_range_fails_and_nulls_are_ignored():
     df = clean_load()
     df.loc[10, "value_mwh"] = 12000.0

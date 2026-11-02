@@ -25,3 +25,4 @@ ENTSO-E switched MAVIR actual load to 15-minute resolution at least by August 20
 
 - An upstream change stops forecasts until it is handled; for a portfolio pipeline that is the right trade.
 - Rollout needs a warn phase until history is clean (spec 014 runbook), otherwise the check fails on the corrupted window.
+- Late data is not bad data. The hourly path judged a day complete from the clock, so it failed every night from 23:05 UTC until the next ingestion arrived (2026-10-31, 2026-11-01). It now judges a day only `DQ_DAY_SETTLE_HOURS` after it ended, so a real gap fails up to that much later.
