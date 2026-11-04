@@ -1,5 +1,11 @@
 # Energy Consumption Forecasting — MLOps Pipeline on Databricks
 
+- **What:** forecasts Hungarian electricity load 24 hours ahead, every hour, from raw ENTSO-E and Open-Meteo data to a monitored forecast on Databricks.
+- **Result:** 4.07% MAPE vs 8.93% for the weekly naive baseline in the production run's rolling backtest; the current model has [no live measurement yet](#status-2026-11-04).
+- **Leakage:** training, backtest and serving share one point-in-time feature function, and earlier results that used future data were withdrawn.
+- **Operations:** hourly error monitoring against the baseline, a promotion gate, naive fallback with a recorded reason, and error-triggered retraining (built and tested, not yet fired live).
+- **Stack:** Python, LightGBM, Databricks Free Edition, Unity Catalog, MLflow, Asset Bundles, GitHub Actions; 398 tests, 94.6% line coverage of `src/`.
+
 End-to-end forecasting pipeline for Hungarian electricity consumption using live ENTSO-E data, Databricks, Delta Lake, and MLflow. Hourly predictions, live error monitoring against seasonal naive, error-triggered retraining (plus a weekly safety-net run), CI/CD via GitHub Actions.
 
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
@@ -9,16 +15,18 @@ End-to-end forecasting pipeline for Hungarian electricity consumption using live
 
 > This project is a portfolio demonstration. Forecasts are not intended for operational grid management or energy trading decisions.
 
-## Status (2026-11-03)
+## Status (2026-11-04)
 
 What the pipeline has and has not shown live so far:
 
 - **Scheduled:** the hourly job and the Sunday retrain run on their Databricks schedules. The GitHub ingestion cron fires irregularly ([Known Limitations](#known-limitations), item 3).
-- **Serving:** LightGBM serves from target hour 2026-11-03 20:00 UTC. No served hour has an actual yet, so there is **no live model error or skill**: `forecast_error_monitor` has 0 `served_model` rows.
-- **Error trigger:** 0 degraded checks and 0 retrains in 56 monitor checks. It has never started a retrain live.
+- **Serving:** LightGBM serves from target hour 2026-11-03 20:00 UTC; the current model `663d2aee` from target hour 2026-11-04 14:00 UTC, with no scored hour yet.
+- **Live accuracy:** first 9 live hours (2026-11-03 20:00 to 2026-11-04 04:00 UTC), all overnight and from the previous model `11cca81f`: 2.39% MAPE vs 3.15% for seasonal naive on the same hours, skill 0.242. **Too few to report as a result.**
+- **Ingestion gap:** no actuals after 2026-11-04 04:00 UTC at the time of this check; the 14:15 UTC run failed on an ENTSO-E `599` response.
+- **Error trigger:** 0 degraded checks and 0 retrains in 79 monitor checks. It has never started a retrain live, and its 72-hour evidence floor has not been reached.
 - **Promotion gate:** one live as-of run (2026-11-03): 37 common rows, as-of 4.851% vs champion 4.804%, limit 4.901%, promoted. That champion predates spec 020, so the expected as-of = champion match has not been observed.
 - **Fallbacks:** only `no_production_run` has occurred live (1 row). `model_error`, `weather_table_missing`, `model_inputs_missing` and the daily naive are tested in code only.
-- **Coverage alert:** `LOW_COVERAGE` is active (36 of 168 hours scored), because the reconstructed naive rows from before 2026-11-01 are backfilled and do not count.
+- **Coverage alert:** `LOW_COVERAGE` is active (56 of 168 hours scored), because the reconstructed naive rows from before 2026-11-01 are backfilled and do not count.
 
 ## Architecture
 
@@ -117,7 +125,7 @@ Without the weather forecasts the offline backtest MAPE rises from 3.95% to 5.28
 | **Bronze** | `bronze_load` | 7 cols | timestamp, country, value_mwh, source, fetched_at, run_id, is_gap |
 | **Bronze** | `bronze_weather_forecast` | 7 cols | timestamp (valid hour), temperature_fc, humidity_fc, cloud_cover_fc, shortwave_fc, model, fetched_at — one row per hour, latest fetch wins (spec 019) |
 | **Bronze** | `bronze_temperature` | 8 cols | timestamp, temperature_c, humidity_pct, cloud_cover_pct, is_weather_imputed, source, fetched_at, run_id |
-| **Silver** | `silver_features` | 29 cols | 21 feature columns + 8 metadata (timestamp, country, value_mwh, is_gap, source, fetched_at, feature_built_at, run_id) |
+| **Silver** | `silver_features` | 29 cols | 18 feature columns (data-quality checks and drift diagnostics, not model input) + 3 quality flags (has_lag_gap, is_weather_imputed, temp_missing) + 8 metadata (timestamp, country, value_mwh, is_gap, source, fetched_at, feature_built_at, run_id) |
 | **Gold** | `gold_forecasts` | 15 cols | forecast_id (MD5 PK), timestamp (prediction target time, spec 006), forecast_run_at (hour of the writing run), model_name (`energy_lgbm_24h`, `seasonal_naive`, `daily_naive`), model_version, horizon_hours, predicted_mwh, actual_mwh, is_backfilled, pipeline_run_id, created_at (actual write time), is_served (spec 017; NULL on older rows = served), issued_at (nominal issuance τ' = T − 24h), is_catch_up, fallback_reason (`no_production_run`, `model_error:<Type>`, `weather_table_missing`, `model_inputs_missing:<cols>`; spec 019b; NULL on model rows and older rows = legacy) |
 | **Control** | `drift_control` | 16 cols | check_timestamp, data_drift_detected, prediction_drift_detected, consecutive_drift_hours, retrain_triggered |
 | **Control** | `forecast_error_monitor` | 17 cols | check_timestamp, window_hours (24/168/720), stream (served / served_model / naive / shadow_lgbm), model_name, n, coverage, mape, mae, bias, naive_mape_paired, relative_skill, alerts, created_at, degraded, consecutive_degraded_hours, retrain_triggered, retrain_reason |
@@ -206,8 +214,8 @@ While seasonal naive serves there is no model to judge, so the Sunday 02:00 UTC 
 
 | Workflow | Trigger | Steps |
 |---|---|---|
-| **ci.yml** | PR to main; push to `feature/*` or `prediction_dashboard` | `ruff check` → `mypy src/` → `pytest --cov-fail-under=80` |
-| **deploy.yml** | Push to main | Validate Bundle (`--target prod`), then deploy prod, then deploy dev — no staging gate (both targets on the same push) |
+| **ci.yml** | PR to main; push to `feature/*` or `prediction_dashboard`; called by `deploy.yml` | `ruff check` → `mypy src/` → `pytest --cov-fail-under=80` |
+| **deploy.yml** | Push to main, manual | Run `ci.yml`; if it passes, validate Bundle (`--target prod`), then deploy prod, then deploy dev — no staging gate (both targets on the same push) |
 | **ingestion_hourly.yml** | Cron `5 * * * *`, push to main, manual | Fetch ENTSO-E + OpenMeteo (`lookback_hours`, default 24) → segment → upload to UC Volumes → trigger Databricks job |
 | **backfill.yml** | Manual (`start_date`, `end_date`) | Fetch history in chunks → upload to `/raw_backfill/` (no job trigger; load with `00_backfill_bronze`) |
 
@@ -251,7 +259,7 @@ energy-forecasting-mlops/
 │   ├── drift.py                    # Drift extraction, streak/cooldown trigger rules (spec 011)
 │   ├── error_monitoring.py         # Live error metrics, paired naive comparison, alerts (spec 017)
 │   ├── error_trigger.py            # Served-run degradation and retrain decision (spec 018)
-│   ├── features.py                 # Feature engineering (18 columns)
+│   ├── features.py                 # Silver features (18 columns; model inputs are in pit_features.py)
 │   ├── forecast_timing.py          # Inference anchor → target timestamp (spec 006)
 │   ├── gold_rows.py                # Gold row builder + naive gold history (spec 017, 019b)
 │   ├── serving_plan.py             # Catch-up targets + serving decision, pure (spec 019b)
@@ -389,7 +397,7 @@ These figures score the backtest's fold models, not the refitted model that serv
 | 2026-09 | 3.00% | 5.05% | 11.60% |
 | 2026-10 | 3.13% | 5.81% | 9.92% |
 
-LightGBM beats the served fallback in every month (skill 0.547). **3.95% is not a clean holdout:** four choices were compared on this same window — the 24h load-availability lag (2/6/12/24h: 3.78–3.95%), dropping the then-latest load feature, the objective (l2 3.781% vs l1 3.796%), and the ablations below (informational only) — each moving MAPE by ≤ 0.16 pp. The backtest retrains once per month (one model per fold); production retrains weekly. The clean holdout is the live monitor (`09_error_monitor`), which has no model result yet ([Status](#status-2026-11-03)). Sanity checks from the same offline harness: without the weather forecasts MAPE is 5.28%; a calendar + two-lag model already reaches 5.49% (the weekly naive is weak on holidays and weather swings); a deliberately leaked feature drops MAPE to 0.98%, so a leak would show. See [Live Error Monitoring](#live-error-monitoring) for how live accuracy is measured.
+LightGBM beats the served fallback in every month (skill 0.547). **3.95% is not a clean holdout:** four choices were compared on this same window — the 24h load-availability lag (2/6/12/24h: 3.78–3.95%), dropping the then-latest load feature, the objective (l2 3.781% vs l1 3.796%), and the ablations below (informational only) — each moving MAPE by ≤ 0.16 pp. The backtest retrains once per month (one model per fold); production retrains weekly. The clean holdout is the live monitor (`09_error_monitor`), which has only 9 overnight hours of an earlier model so far ([Status](#status-2026-11-04)). Sanity checks from the same offline harness: without the weather forecasts MAPE is 5.28%; a calendar + two-lag model already reaches 5.49% (the weekly naive is weak on holidays and weather swings); a deliberately leaked feature drops MAPE to 0.98%, so a leak would show. See [Live Error Monitoring](#live-error-monitoring) for how live accuracy is measured.
 
 Every model and metric produced before spec 014 was trained on corrupted load data (see [Data Incident, October 2026](#data-incident-october-2026)), and every model before spec 019 used features not available at forecast time (future weather fill, future anchors at serving); none of them is reported here as a result. One still shows up live: the monitor's shadow stream (see [Live Error Monitoring](#live-error-monitoring)).
 
@@ -423,7 +431,7 @@ The 168h horizon was dropped in spec 013 ([ADR-0001](docs/adr/0001-drop-168h-hor
 2. **Free Tier Quotas**: Databricks Free Edition concurrency limits may cause queuing.
 3. **Ingestion depends on GitHub's scheduler:** in the 30 days to 2026-11-01 the scheduled workflow ran 145 times instead of ~720, with gaps up to 180h, and each run fetches only the last 24h. The model tolerates load up to 22h late and catch-up recovers missed runs within 24h, but on that sample ~49% of target hours would still have had no forecast (52.8% without catch-up): the long gaps need a reliable scheduler and a longer lookback (BL-41).
 4. **No Model Registry**: promotion uses run tags instead of `mlflow.register_model()`, as a workaround for a Free Edition restriction the notebooks cite; this repo does not test that restriction.
-5. **No staging gate and no dev/prod data isolation**: `deploy.yml` deploys on every push to main without waiting for CI, and the dev target writes the same tables as prod (catalog and schema are fixed in `src/config.py`).
+5. **No staging gate and no dev/prod data isolation**: `deploy.yml` deploys every push to main that passes CI straight to prod, and the dev target writes the same tables as prod (catalog and schema are fixed in `src/config.py`).
 6. **One weather point:** a single Budapest grid point stands in for the whole country.
 7. **A covered target is never rewritten:** the first served row for a target hour is final, even a naive fallback whose model inputs arrive later.
 

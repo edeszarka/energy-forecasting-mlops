@@ -5,6 +5,7 @@ on:
     branches: [main]
   push:
     branches: [feature/*, prediction_dashboard]
+  workflow_call: # deploy.yml runs this before deploying
 
 jobs:
   test:
