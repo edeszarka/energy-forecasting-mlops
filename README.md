@@ -1,7 +1,7 @@
 # Energy Consumption Forecasting — MLOps Pipeline on Databricks
 
 - **What:** forecasts Hungarian electricity load 24 hours ahead, every hour, from raw ENTSO-E and Open-Meteo data to a monitored forecast on Databricks.
-- **Result:** 4.07% MAPE vs 8.93% for the weekly naive baseline in the production run's rolling backtest; live accuracy is [not measured yet](#status-2026-11-03).
+- **Result:** 4.07% MAPE vs 8.93% for the weekly naive baseline in the production run's rolling backtest; the current model has [no live measurement yet](#status-2026-11-04).
 - **Leakage:** training, backtest and serving share one point-in-time feature function, and earlier results that used future data were withdrawn.
 - **Operations:** hourly error monitoring against the baseline, a promotion gate, naive fallback with a recorded reason, and error-triggered retraining (built and tested, not yet fired live).
 - **Stack:** Python, LightGBM, Databricks Free Edition, Unity Catalog, MLflow, Asset Bundles, GitHub Actions; 398 tests, 94.6% line coverage of `src/`.
@@ -15,16 +15,18 @@ End-to-end forecasting pipeline for Hungarian electricity consumption using live
 
 > This project is a portfolio demonstration. Forecasts are not intended for operational grid management or energy trading decisions.
 
-## Status (2026-11-03)
+## Status (2026-11-04)
 
 What the pipeline has and has not shown live so far:
 
 - **Scheduled:** the hourly job and the Sunday retrain run on their Databricks schedules. The GitHub ingestion cron fires irregularly ([Known Limitations](#known-limitations), item 3).
-- **Serving:** LightGBM serves from target hour 2026-11-03 20:00 UTC. No served hour has an actual yet, so there is **no live model error or skill**: the `served_model` rows in `forecast_error_monitor` have scored 0 hours.
-- **Error trigger:** 0 degraded checks and 0 retrains in 61 monitor checks. It has never started a retrain live.
+- **Serving:** LightGBM serves from target hour 2026-11-03 20:00 UTC; the current model `663d2aee` from target hour 2026-11-04 14:00 UTC, with no scored hour yet.
+- **Live accuracy:** first 9 live hours (2026-11-03 20:00 to 2026-11-04 04:00 UTC), all overnight and from the previous model `11cca81f`: 2.39% MAPE vs 3.15% for seasonal naive on the same hours, skill 0.242. **Too few to report as a result.**
+- **Ingestion gap:** no actuals after 2026-11-04 04:00 UTC at the time of this check; the 14:15 UTC run failed on an ENTSO-E `599` response.
+- **Error trigger:** 0 degraded checks and 0 retrains in 79 monitor checks. It has never started a retrain live, and its 72-hour evidence floor has not been reached.
 - **Promotion gate:** one live as-of run (2026-11-03): 37 common rows, as-of 4.851% vs champion 4.804%, limit 4.901%, promoted. That champion predates spec 020, so the expected as-of = champion match has not been observed.
 - **Fallbacks:** only `no_production_run` has occurred live (1 row). `model_error`, `weather_table_missing`, `model_inputs_missing` and the daily naive are tested in code only.
-- **Coverage alert:** `LOW_COVERAGE` is active (36 of 168 hours scored), because the reconstructed naive rows from before 2026-11-01 are backfilled and do not count.
+- **Coverage alert:** `LOW_COVERAGE` is active (56 of 168 hours scored), because the reconstructed naive rows from before 2026-11-01 are backfilled and do not count.
 
 ## Architecture
 
@@ -395,7 +397,7 @@ These figures score the backtest's fold models, not the refitted model that serv
 | 2026-09 | 3.00% | 5.05% | 11.60% |
 | 2026-10 | 3.13% | 5.81% | 9.92% |
 
-LightGBM beats the served fallback in every month (skill 0.547). **3.95% is not a clean holdout:** four choices were compared on this same window — the 24h load-availability lag (2/6/12/24h: 3.78–3.95%), dropping the then-latest load feature, the objective (l2 3.781% vs l1 3.796%), and the ablations below (informational only) — each moving MAPE by ≤ 0.16 pp. The backtest retrains once per month (one model per fold); production retrains weekly. The clean holdout is the live monitor (`09_error_monitor`), which has no model result yet ([Status](#status-2026-11-03)). Sanity checks from the same offline harness: without the weather forecasts MAPE is 5.28%; a calendar + two-lag model already reaches 5.49% (the weekly naive is weak on holidays and weather swings); a deliberately leaked feature drops MAPE to 0.98%, so a leak would show. See [Live Error Monitoring](#live-error-monitoring) for how live accuracy is measured.
+LightGBM beats the served fallback in every month (skill 0.547). **3.95% is not a clean holdout:** four choices were compared on this same window — the 24h load-availability lag (2/6/12/24h: 3.78–3.95%), dropping the then-latest load feature, the objective (l2 3.781% vs l1 3.796%), and the ablations below (informational only) — each moving MAPE by ≤ 0.16 pp. The backtest retrains once per month (one model per fold); production retrains weekly. The clean holdout is the live monitor (`09_error_monitor`), which has only 9 overnight hours of an earlier model so far ([Status](#status-2026-11-04)). Sanity checks from the same offline harness: without the weather forecasts MAPE is 5.28%; a calendar + two-lag model already reaches 5.49% (the weekly naive is weak on holidays and weather swings); a deliberately leaked feature drops MAPE to 0.98%, so a leak would show. See [Live Error Monitoring](#live-error-monitoring) for how live accuracy is measured.
 
 Every model and metric produced before spec 014 was trained on corrupted load data (see [Data Incident, October 2026](#data-incident-october-2026)), and every model before spec 019 used features not available at forecast time (future weather fill, future anchors at serving); none of them is reported here as a result. One still shows up live: the monitor's shadow stream (see [Live Error Monitoring](#live-error-monitoring)).
 
