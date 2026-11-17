@@ -267,6 +267,53 @@ def test_03_reference_window_uses_only_version_2_runs():
     assert all("tags.data_version = '2'" in f for f in client.filters)
 
 
+class _OrCondition:
+    def __init__(self, parts):
+        self.parts = parts
+
+    def __or__(self, other):
+        return _OrCondition(self.parts + other.parts)
+
+
+class _SeasonalCol(_FakeCol):
+    def between(self, start, end):
+        return _OrCondition([(start, end)])
+
+
+def test_03_seasonal_reference_filters_same_weeks_of_earlier_years():
+    from src.drift import seasonal_reference_windows
+
+    calls = []
+    spark = SimpleNamespace(table=lambda name: _FakeFrame(calls))
+    get_seasonal = _functions(
+        "notebooks/03_drift_check.py",
+        "get_seasonal_reference_window",
+        F=SimpleNamespace(col=_SeasonalCol),
+        seasonal_reference_windows=seasonal_reference_windows,
+    )["get_seasonal_reference_window"]
+    config = {
+        "silver_table": "silver",
+        "target_column": "value_mwh",
+        "feature_columns": [],
+        "seasonal_reference_years": 2,
+        "seasonal_reference_pad_days": 7,
+    }
+
+    _, source, start, end = get_seasonal(
+        spark, config, datetime(2026, 11, 10, 3, tzinfo=UTC), datetime(2026, 11, 17, 3, tzinfo=UTC)
+    )
+
+    assert calls[0].parts == [
+        (datetime(2025, 11, 4, 3, tzinfo=UTC), datetime(2025, 11, 25, 3, tzinfo=UTC)),
+        (datetime(2024, 11, 5, 3, tzinfo=UTC), datetime(2024, 11, 26, 3, tzinfo=UTC)),
+    ]
+    assert (start, end) == (
+        datetime(2024, 11, 5, 3, tzinfo=UTC),
+        datetime(2025, 11, 25, 3, tzinfo=UTC),
+    )
+    assert source == "seasonal_same_weeks (2025-11-04..2025-11-25, 2024-11-05..2024-11-26)"
+
+
 # --- remediation ----------------------------------------------------------------
 
 

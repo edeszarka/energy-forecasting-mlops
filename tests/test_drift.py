@@ -83,6 +83,7 @@ import pytest  # noqa: E402
 from src.drift import (  # noqa: E402
     count_consecutive_hours,
     decide_retrain,
+    seasonal_reference_windows,
     select_drift_columns,
 )
 
@@ -91,6 +92,28 @@ NOW = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
 
 def hours_ago(n):
     return (NOW - timedelta(hours=n)).replace(tzinfo=None)
+
+
+class TestSeasonalReferenceWindows:
+    START = datetime(2026, 11, 10, 3, 0)
+    END = datetime(2026, 11, 17, 3, 0)
+
+    def test_same_weeks_previous_years_with_padding(self):
+        windows = seasonal_reference_windows(self.START, self.END, years=2, pad_days=7)
+        assert windows == [
+            (pd.Timestamp("2025-11-04 03:00"), pd.Timestamp("2025-11-25 03:00")),
+            (pd.Timestamp("2024-11-05 03:00"), pd.Timestamp("2024-11-26 03:00")),
+        ]
+
+    def test_weekdays_stay_aligned(self):
+        for ref_start, _ in seasonal_reference_windows(self.START, self.END, pad_days=0):
+            assert ref_start.dayofweek == pd.Timestamp(self.START).dayofweek
+
+    def test_accepts_aware_timestamps(self):
+        aware = seasonal_reference_windows(
+            self.START.replace(tzinfo=UTC), self.END.replace(tzinfo=UTC), years=1
+        )
+        assert aware == seasonal_reference_windows(self.START, self.END, years=1)
 
 
 class TestSelectDriftColumns:
@@ -118,6 +141,24 @@ class TestCountConsecutiveDriftHours:
 
     def test_empty_history(self):
         assert count_consecutive_hours([], NOW, True) == 1
+
+    def test_daily_step_counts_contiguous_days(self):
+        history = [(hours_ago(24), True), (hours_ago(48), True), (hours_ago(72), False)]
+        assert count_consecutive_hours(history, NOW, True, step="D") == 3
+
+    def test_daily_step_missing_day_breaks_streak(self):
+        history = [(hours_ago(24), True), (hours_ago(72), True)]
+        assert count_consecutive_hours(history, NOW, True, step="D") == 2
+
+    def test_daily_step_with_older_hourly_rows(self):
+        # Hourly rows from before the daily schedule: the newest in each day counts.
+        yesterday = NOW - timedelta(days=1)
+        # Newest first, as 03_drift_check reads it.
+        history = [
+            (yesterday.replace(hour=23, tzinfo=None), True),
+            (yesterday.replace(hour=1, tzinfo=None), False),
+        ]
+        assert count_consecutive_hours(history, NOW, True, step="D") == 2
 
 
 class TestDecideRetrain:

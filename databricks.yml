@@ -49,17 +49,9 @@ resources:
           environment_key: "default"
           timeout_seconds: 900
 
-        - task_key: "drift_check"
-          depends_on:
-            - task_key: "transform"
-          notebook_task:
-            notebook_path: ./notebooks/03_drift_check.py  # diagnostic only (spec 018)
-          environment_key: "default"
-          timeout_seconds: 900
-
         - task_key: "predict"
           depends_on:
-            - task_key: "drift_check"
+            - task_key: "transform"
             - task_key: "ingest_weather_forecast"
           notebook_task:
             notebook_path: ./notebooks/04_predict.py
@@ -75,6 +67,29 @@ resources:
               # Sustained forecast degradation starts this job directly
               # (fire-and-forget, spec 018); its weekly schedule stays as a safety net.
               retraining_job_id: ${resources.jobs.energy_retraining_pipeline.id}
+          environment_key: "default"
+          timeout_seconds: 900
+
+    # Data drift is diagnostic only (spec 018, ADR-0007) and nothing in the hourly
+    # path reads it, so it runs once a day in its own job. Hourly runs spent Free
+    # Edition compute quota on a check that reported the same seasonal drift every hour.
+    energy_drift_daily:
+      name: "energy_drift_daily"
+      schedule:
+        quartz_cron_expression: "0 30 3 * * ?"
+        timezone_id: "UTC"
+      max_concurrent_runs: 1
+      email_notifications:
+        on_failure:
+          - ${workspace.current_user.userName}
+      environments:
+        - environment_key: "default"
+          spec:
+            environment_version: "5"
+      tasks:
+        - task_key: "drift_check"
+          notebook_task:
+            notebook_path: ./notebooks/03_drift_check.py
           environment_key: "default"
           timeout_seconds: 900
 
@@ -119,6 +134,9 @@ targets:
     resources:
       jobs:
         energy_hourly_pipeline:
+          schedule:
+            pause_status: PAUSED
+        energy_drift_daily:
           schedule:
             pause_status: PAUSED
         energy_retraining_pipeline:
