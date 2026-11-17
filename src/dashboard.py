@@ -215,7 +215,9 @@ def mae_trend_tab() -> None:
         if pd.notna(latest["prediction_mae_reference"])
         else "N/A",
     )
-    k3.metric("Consecutive Drift Hours", str(latest["consecutive_drift_hours"]))
+    # The column keeps its old name; drift is checked daily, so the unit is days
+    # (hourly checks before the daily schedule).
+    k3.metric("Consecutive Drift Days", str(latest["consecutive_drift_hours"]))
     k4.metric("Retrain Triggered", "Yes" if latest["retrain_triggered"] else "No")
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -258,7 +260,7 @@ def mae_trend_tab() -> None:
         legend=dict(x=0.01, y=0.99),
     )
     fig.update_yaxes(title_text="MAE (MW)", secondary_y=False)
-    fig.update_yaxes(title_text="Consecutive drift hours", secondary_y=True)
+    fig.update_yaxes(title_text="Consecutive drift checks", secondary_y=True)
 
     st.plotly_chart(fig, use_container_width=True)
 

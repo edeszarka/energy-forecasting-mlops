@@ -74,6 +74,8 @@ print("version:", __import__("evidently").__version__)
 # # 03_drift_check
 # **Purpose:** Diagnose data drift using Evidently AI. Never triggers retraining (spec 018);
 # forecast error and the retrain trigger live in 09_error_monitor.
+# **Schedule:** once a day in its own job, `energy_drift_daily` (03:30 UTC); it is not
+# part of the hourly pipeline.
 # **Inputs:** `workspace.energy_forecasting.silver_features`
 # **Outputs:** `workspace.energy_forecasting.drift_control`, HTML reports in Volumes.
 #
@@ -116,7 +118,11 @@ from src.config import (
     PATHS,
     SCHEMA,
 )
-from src.drift import count_consecutive_hours, select_drift_columns
+from src.drift import (
+    count_consecutive_hours,
+    seasonal_reference_windows,
+    select_drift_columns,
+)
 from src.promotion import pick_production_run
 
 # COMMAND ----------
@@ -128,6 +134,8 @@ from src.promotion import pick_production_run
 dbutils.widgets.text("drift_threshold", "0.15")
 dbutils.widgets.text("current_window_days", "7")
 dbutils.widgets.text("min_rows_for_drift", "100")
+dbutils.widgets.text("seasonal_reference_years", "2")
+dbutils.widgets.text("seasonal_reference_pad_days", "7")
 
 CONFIG = {
     "silver_table": PATHS.table_silver,
@@ -136,6 +144,8 @@ CONFIG = {
     "drift_threshold": float(dbutils.widgets.get("drift_threshold")),
     "current_window_days": int(dbutils.widgets.get("current_window_days")),
     "min_rows_for_drift": int(dbutils.widgets.get("min_rows_for_drift")),
+    "seasonal_reference_years": int(dbutils.widgets.get("seasonal_reference_years")),
+    "seasonal_reference_pad_days": int(dbutils.widgets.get("seasonal_reference_pad_days")),
     "primary_model_name": "energy_lgbm_24h",
     "feature_columns": DRIFT_FEATURE_COLUMNS,  # sourced from src/config.py
     # Calendar features are excluded from the drift test (spec 011 §1.4)
@@ -225,6 +235,37 @@ def get_reference_window(
     )
 
     return ref_df, source, training_start, training_end
+
+
+def get_seasonal_reference_window(
+    spark: SparkSession, config: dict, window_start: datetime, window_end: datetime
+) -> tuple[pd.DataFrame, str, datetime, datetime]:
+    """
+    The same calendar weeks in earlier years (52-week shift, padded), so the check
+    flags what is unusual for the time of year instead of the season itself.
+    Returns (reference_df, source_description, earliest_start, latest_end).
+    """
+    windows = [
+        (s.tz_localize("UTC").to_pydatetime(), e.tz_localize("UTC").to_pydatetime())
+        for s, e in seasonal_reference_windows(
+            window_start,
+            window_end,
+            years=config["seasonal_reference_years"],
+            pad_days=config["seasonal_reference_pad_days"],
+        )
+    ]
+    condition = F.col("timestamp").between(*windows[0])
+    for start, end in windows[1:]:
+        condition = condition | F.col("timestamp").between(start, end)
+
+    ref_df = (
+        spark.table(config["silver_table"])
+        .filter(condition)
+        .select(["timestamp", config["target_column"]] + config["feature_columns"])
+        .toPandas()
+    )
+    spans = ", ".join(f"{s:%Y-%m-%d}..{e:%Y-%m-%d}" for s, e in windows)
+    return ref_df, f"seasonal_same_weeks ({spans})", windows[-1][0], windows[0][1]
 
 
 # COMMAND ----------
@@ -322,17 +363,20 @@ def run_data_drift(
 # ────────────────────────────────────────
 
 
-def get_consecutive_drift_hours(
+def get_consecutive_drift_days(
     spark: SparkSession, config: dict, check_time: datetime, current_any_drift: bool
 ) -> int:
     """
-    Counts consecutive HOURLY drift checks; a missing hour breaks the streak.
+    Counts consecutive DAILY drift checks; a missing day breaks the streak.
+
+    Stored in the `consecutive_drift_hours` column, which keeps its name so the
+    Delta schema does not change; since the daily schedule its unit is days.
     """
     try:
         history = (
             spark.table(config["drift_table"])
             .orderBy(F.col("check_timestamp").desc())
-            .limit(72)
+            .limit(400)  # older hourly rows: several per day
             .select("check_timestamp", "any_drift_detected")
             .collect()
         )
@@ -341,7 +385,7 @@ def get_consecutive_drift_hours(
         logger.warning(f"Could not read drift history: {e}")
         pairs = []
 
-    return count_consecutive_hours(pairs, check_time, current_any_drift)
+    return count_consecutive_hours(pairs, check_time, current_any_drift, step="D")
 
 
 # COMMAND ----------
@@ -401,18 +445,28 @@ drift_control_schema = StructType(
 )
 
 # Load windows
-ref_df, source_desc, ref_start, ref_end = get_reference_window(spark, mlflow_client, CONFIG)
-logger.info(f"Loaded reference window from {source_desc}: {ref_start} to {ref_end}")
-
 curr_df, window_start, window_end = get_current_window(spark, CONFIG)
 logger.info(f"Loaded current window: {window_start} to {window_end}")
+
+# Reference: the same weeks in earlier years. Silver history starts 2024-01-01
+# (spec 014), so early in a year one of the windows can be thin or empty; with
+# too few rows overall, fall back to the production model's training window.
+ref_df, source_desc, ref_start, ref_end = get_seasonal_reference_window(
+    spark, CONFIG, window_start, window_end
+)
+if len(ref_df) < CONFIG["min_rows_for_drift"]:
+    logger.warning(
+        f"Seasonal reference has only {len(ref_df)} rows; using the training window instead."
+    )
+    ref_df, source_desc, ref_start, ref_end = get_reference_window(spark, mlflow_client, CONFIG)
+logger.info(f"Loaded reference from {source_desc}: {ref_start} to {ref_end}, {len(ref_df)} rows")
 
 # Run monitoring
 data_drift = run_data_drift(ref_df, curr_df, CONFIG)
 # Forecast error is monitored by 09_error_monitor (spec 017); the old LightGBM-only
 # prediction-MAE check is retired and its drift_control columns are written empty.
 any_drift = bool(data_drift["dataset_drift"])
-consecutive_hours = get_consecutive_drift_hours(spark, CONFIG, check_time, any_drift)
+consecutive_days = get_consecutive_drift_days(spark, CONFIG, check_time, any_drift)
 
 # Data drift is diagnostic only (spec 018, ADR-0007): it is recorded but never
 # starts a retrain. 09_error_monitor triggers retraining on forecast degradation.
@@ -434,7 +488,7 @@ result_row = {
     "drift_score_temp": float(data_drift["drift_score_temp"]),
     "prediction_mae_current": None,
     "prediction_mae_reference": None,
-    "consecutive_drift_hours": int(consecutive_hours),
+    "consecutive_drift_hours": int(consecutive_days),  # unit: days (see above)
     "retrain_triggered": False,
     "report_path": report_path,
     "created_at": datetime.now(UTC),
@@ -455,11 +509,12 @@ print(f"""
 ┌─────────────────────────────────────────────────┐
 │ DRIFT CHECK SUMMARY — {check_time.strftime("%Y-%m-%d %H:%M")} UTC │
 ├─────────────────────────────────────────────────┤
+│ Reference:                 {source_desc}
 │ Data drift detected:       {data_drift["dataset_drift"]}
 │ Drifted features (N):      {data_drift["n_drifted_features"]} ({result_row["drifted_features"]})
 │ value_mwh drift score:     {data_drift["drift_score_value_mwh"]:.4f}
 │ temperature_c drift score:  {data_drift["drift_score_temp"]:.4f}
-│ Consecutive drift hours:   {consecutive_hours}
+│ Consecutive drift days:    {consecutive_days}
 │ Retrain trigger:           none (diagnostic only; see 09_error_monitor)
 │ HTML report:               {report_path}
 └─────────────────────────────────────────────────┘

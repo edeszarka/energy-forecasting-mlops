@@ -100,6 +100,33 @@ DRIFT_EXCLUDED_FEATURES: frozenset[str] = frozenset(
 )
 
 
+SEASONAL_SHIFT_DAYS = 364  # 52 weeks: the same weekdays one year earlier
+
+
+def seasonal_reference_windows(
+    window_start: TimestampLike,
+    window_end: TimestampLike,
+    years: int = 2,
+    pad_days: int = 7,
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """Reference windows for the drift check: the same weeks in earlier years.
+
+    A 7-day window compared with the 30 days before it always "drifts" in spring
+    and autumn, because the season changes. Comparing it with the same calendar
+    weeks of earlier years removes that, so drift means "unusual for this time of
+    year". Each window is shifted back by 52 weeks per year (weekdays stay
+    aligned) and widened by `pad_days` on both sides for more rows and less
+    sensitivity to one odd week. Returned newest first, as naive UTC.
+    """
+    start, end = to_naive_utc(window_start), to_naive_utc(window_end)
+    pad = pd.Timedelta(days=pad_days)
+    windows = []
+    for k in range(1, years + 1):
+        shift = pd.Timedelta(days=SEASONAL_SHIFT_DAYS * k)
+        windows.append((start - shift - pad, end - shift + pad))
+    return windows
+
+
 def select_drift_columns(feature_columns: list[str]) -> list[str]:
     """Returns the feature columns that are meaningful to test for drift."""
     return [c for c in feature_columns if c not in DRIFT_EXCLUDED_FEATURES]
@@ -109,24 +136,30 @@ def count_consecutive_hours(
     history: list[tuple[TimestampLike, bool]],
     check_time: TimestampLike,
     current_active: bool,
+    step: str = "h",
 ) -> int:
-    """Counts consecutive HOURLY checks with an active signal ending at `check_time`.
+    """Counts consecutive checks with an active signal ending at `check_time`.
 
     `history` is (check_timestamp, signal) pairs — data drift from drift_control,
     or forecast degradation from forecast_error_monitor (spec 018) — in any
-    order. The streak only continues while each earlier check sits exactly one
-    hour before the next one — a missing hour (job outage) breaks it, so
-    "3 consecutive hours" can never span 3 rows spread over days (spec 011 §1.5).
+    order. `step` is the check cadence as a pandas frequency: "h" for hourly
+    checks (the default), "D" for the daily drift check. The streak only
+    continues while each earlier check sits exactly one step before the next
+    one — a missing step (job outage) breaks it, so "3 consecutive hours" can
+    never span 3 rows spread over days (spec 011 §1.5). When several checks
+    fall in one step (hourly rows read with step="D"), the newest one counts.
     """
     if not current_active:
         return 0
 
-    active_by_hour = {to_naive_utc(ts).floor("h"): bool(flag) for ts, flag in history}
+    delta = pd.Timedelta(1, unit=step)
+    ordered = sorted(((to_naive_utc(ts), bool(flag)) for ts, flag in history), key=lambda p: p[0])
+    active_by_step = {ts.floor(step): flag for ts, flag in ordered}
     count = 1
-    expected = to_naive_utc(check_time).floor("h") - pd.Timedelta(hours=1)
-    while active_by_hour.get(expected):
+    expected = to_naive_utc(check_time).floor(step) - delta
+    while active_by_step.get(expected):
         count += 1
-        expected -= pd.Timedelta(hours=1)
+        expected -= delta
     return count
 
 

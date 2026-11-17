@@ -19,7 +19,7 @@ End-to-end forecasting pipeline for Hungarian electricity consumption using live
 
 What the pipeline has and has not shown live so far:
 
-- **Scheduled:** the hourly job and the Sunday retrain run on their Databricks schedules. The GitHub ingestion cron fires irregularly ([Known Limitations](#known-limitations), item 3).
+- **Scheduled:** the hourly job, the daily drift check and the Sunday retrain run on their Databricks schedules. The GitHub ingestion cron fires irregularly ([Known Limitations](#known-limitations), item 3).
 - **Serving:** LightGBM serves from target hour 2026-11-03 20:00 UTC; the current model `663d2aee` from target hour 2026-11-04 14:00 UTC, with no scored hour yet.
 - **Live accuracy:** first 9 live hours (2026-11-03 20:00 to 2026-11-04 04:00 UTC), all overnight and from the previous model `11cca81f`: 2.39% MAPE vs 3.15% for seasonal naive on the same hours, skill 0.242. **Too few to report as a result.**
 - **Ingestion gap:** no actuals after 2026-11-04 04:00 UTC at the time of this check; the 14:15 UTC run failed on an ENTSO-E `599` response.
@@ -53,7 +53,7 @@ This project implements a **Split Ingestion Architecture**: GitHub Actions fetch
                     │                                                   │
         ┌───────────┼───────────┐                       ┌───────────────┼───────────────┐
         ▼           ▼           ▼                       ▼               ▼               ▼
-  01_ingest → 02_transform → 03_drift_check                        06_train_lgbm
+  01_ingest → 02_transform   01b_weather_fc                        06_train_lgbm
         │           │           │                       │               │               │
         └───────────┴───────────┤                       └───────┬───────┘               │
                                 ▼                               ▼                       ▼
@@ -63,7 +63,7 @@ This project implements a **Split Ingestion Architecture**: GitHub Actions fetch
                        09_error_monitor                  08_promote_model
 ```
 
-The pipeline is split into two independent Databricks Workflows: the **Hourly Job** (ingest → transform → drift check, plus `01b_ingest_weather_forecast`, which the diagram omits; both feed predict → error monitor) and the **Retraining Job** (train → evaluate → promote).
+The pipeline is split into independent Databricks Workflows: the **Hourly Job** (ingest → transform, plus `01b_ingest_weather_forecast`; both feed predict → error monitor), the **Retraining Job** (train → evaluate → promote) and the **Daily Drift Job** (`energy_drift_daily`, 03:30 UTC: `03_drift_check` alone, diagnostic only; not in the diagram).
 
 ### Backfill Path
 Historical data takes its own path ([ADR-0005](docs/adr/0005-separate-backfill-path.md)), so re-ingesting years of data neither floods the hourly Volume nor blocks hourly ingestion:
@@ -185,7 +185,7 @@ Since spec 017 ([ADR-0006](docs/adr/0006-live-error-monitoring-and-shadow-scorin
 ## MLOps Design
 
 ### Drift Diagnostics
-`03_drift_check` runs Evidently AI's `DataDriftPreset` on the target and non-calendar features (calendar columns such as `month` differ between any two windows by construction and are excluded) and stores the result in `drift_control` with an HTML report. **It never starts a retrain** (spec 018, [ADR-0007](docs/adr/0007-error-triggered-retraining.md)): between a 7-day current window and a 30-day reference it flagged drift on every hourly check for 60 days, almost always on every feature at once. That is the season changing, not a model failing. Drift tells you *what* changed; the error monitor decides *whether* it matters.
+`03_drift_check` runs Evidently AI's `DataDriftPreset` on the target and non-calendar features (calendar columns such as `month` differ between any two windows by construction and are excluded) and stores the result in `drift_control` with an HTML report. It runs once a day in its own job (`energy_drift_daily`); `consecutive_drift_hours` keeps its column name but counts consecutive daily checks since then. The reference is the **same calendar weeks in the two previous years** (shifted by 52 weeks so weekdays align, padded by 7 days on each side), so a flag means "unusual for this time of year", not "it got colder". If those weeks hold fewer than 100 rows, the check falls back to the production model's training window. **It never starts a retrain** (spec 018, [ADR-0007](docs/adr/0007-error-triggered-retraining.md)): between a 7-day current window and a 30-day reference it flagged drift on every (then hourly) check for 60 days, almost always on every feature at once. That is the season changing, not a model failing. Drift tells you *what* changed; the error monitor decides *whether* it matters.
 
 ### Live Error Monitoring
 `09_error_monitor` runs after `04_predict` (which backfills actuals) and scores four streams over the last 24h, 7d and 30d of target hours: the **served** forecast, the **served model** (hours LightGBM served), **seasonal naive** and the **shadow LightGBM** run. Each model is also compared with naive on exactly the same target hours: `relative_skill = 1 − model MAPE / naive MAPE` (> 0 means it beats naive). MAPE is the mean of `|actual − predicted| / actual`, the same definition as training's naive metric. One row per window and stream goes to `forecast_error_monitor`. The `served` row measures what was delivered, whichever forecaster served, and carries no skill; the model's own metrics and skill are on the `served_model` row, computed only on hours LightGBM served, so naive-fallback hours (seasonal or daily) never enter the model's skill or its alert (spec 019b D9). Monitor rows written before spec 019b was deployed carry the model's skill on the `served` row; from that deploy on it is on the `served_model` row (the first check with a `served_model` row marks the switch), so a skill chart over that boundary must read both. The shadow stream is not filtered by run or feature set: on 2026-11-03 its only scored rows belong to the pre-spec-019 run `7ced99c4` (7-day MAPE 16.64%, skill −0.91), which is not the current model.
@@ -340,9 +340,10 @@ databricks bundle deploy --target prod
 ```
 
 ### Pipeline Execution
-- **Hourly**: `energy_hourly_pipeline` runs on its own Databricks schedule at :05 UTC (ingest → transform → drift_check, plus ingest_weather_forecast; both → predict → error_monitor). Each GitHub Actions run fetches data, uploads it to UC Volumes and also starts the job
+- **Hourly**: `energy_hourly_pipeline` runs on its own Databricks schedule at :05 UTC (ingest → transform, plus ingest_weather_forecast; both → predict → error_monitor). Each GitHub Actions run fetches data, uploads it to UC Volumes and also starts the job
 - **On forecast degradation**: `09_error_monitor` starts `energy_retraining_pipeline` (train → evaluate → promote) after 24 consecutive hourly checks in which the served run, on at least 72 of its own hours, is worse than naive or above the MAPE ceiling
 - **Weekly**: the same job also runs Sundays 02:00 UTC as a safety net
+- **Daily**: `energy_drift_daily` runs `03_drift_check` at 03:30 UTC. It used to run inside the hourly job; nothing in the hourly path reads it, and on Databricks Free Edition the hourly check spent compute quota on the same seasonal result every hour
 
 ## Dashboard
 
