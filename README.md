@@ -216,7 +216,7 @@ While seasonal naive serves there is no model to judge, so the Sunday 02:00 UTC 
 |---|---|---|
 | **ci.yml** | PR to main; push to `feature/*` or `prediction_dashboard`; called by `deploy.yml` | `ruff check` → `mypy src/` → `pytest --cov-fail-under=80` |
 | **deploy.yml** | Push to main, manual | Run `ci.yml`; if it passes, validate Bundle (`--target prod`), then deploy prod, then deploy dev — no staging gate (both targets on the same push) |
-| **ingestion_hourly.yml** | Cron `5 * * * *`, push to main, manual | Fetch ENTSO-E + OpenMeteo (`lookback_hours`, default 24) → segment → upload to UC Volumes → trigger Databricks job |
+| **ingestion_hourly.yml** | Cron `5 * * * *`, push to main, manual | Fetch ENTSO-E + OpenMeteo (`lookback_hours`, default 24) → segment → upload to UC Volumes (the Databricks job picks the files up on its own hourly schedule) |
 | **backfill.yml** | Manual (`start_date`, `end_date`) | Fetch history in chunks → upload to `/raw_backfill/` (no job trigger; load with `00_backfill_bronze`) |
 
 ## Repository Structure
@@ -340,7 +340,7 @@ databricks bundle deploy --target prod
 ```
 
 ### Pipeline Execution
-- **Hourly**: `energy_hourly_pipeline` runs on its own Databricks schedule at :05 UTC (ingest → transform, plus ingest_weather_forecast; both → predict → error_monitor). Each GitHub Actions run fetches data, uploads it to UC Volumes and also starts the job
+- **Hourly**: `energy_hourly_pipeline` runs on its own Databricks schedule at :05 UTC (ingest → transform, plus ingest_weather_forecast; both → predict → error_monitor). Each GitHub Actions run fetches data and uploads it to UC Volumes; it does not start the job, the next scheduled run picks the files up
 - **On forecast degradation**: `09_error_monitor` starts `energy_retraining_pipeline` (train → evaluate → promote) after 24 consecutive hourly checks in which the served run, on at least 72 of its own hours, is worse than naive or above the MAPE ceiling
 - **Weekly**: the same job also runs Sundays 02:00 UTC as a safety net
 - **Daily**: `energy_drift_daily` runs `03_drift_check` at 03:30 UTC. It used to run inside the hourly job; nothing in the hourly path reads it, and on Databricks Free Edition the hourly check spent compute quota on the same seasonal result every hour
