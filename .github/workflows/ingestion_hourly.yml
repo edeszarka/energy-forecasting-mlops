@@ -303,22 +303,11 @@ jobs:
             echo "::warning::No load files were uploaded. Check the fetch step."
           fi
 
-      - name: Trigger Databricks Workflow
-        shell: bash
-        run: |
-          JOB_ID=$(databricks jobs list --output json | \
-            python3 -c "import json, sys; data = json.load(sys.stdin); jobs = data if isinstance(data, list) else data.get('jobs', []); match = [j for j in jobs if j.get('settings', {}).get('name') == 'energy_hourly_pipeline']; print(match[0]['job_id'] if match else '')")
-          
-          if [ -z "$JOB_ID" ]; then
-            echo "::warning::Job 'energy_hourly_pipeline' not found - skipping trigger."
-            exit 0
-          fi
-          
-          RUN_RESPONSE=$(databricks jobs run-now "$JOB_ID" --no-wait --output json)
-          RUN_ID=$(echo "$RUN_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['run_id'])")
-          
-          echo "Triggered job run: $RUN_ID"
-          echo "DATABRICKS_RUN_ID=$RUN_ID" >> $GITHUB_ENV
+      # No run-now trigger here: energy_hourly_pipeline has its own hourly
+      # schedule in databricks.yml (0 5 * * * UTC), and its ingest task picks up
+      # every file in the Volume. A trigger from this workflow ran the whole
+      # pipeline a second time, which spent Free Edition compute quota and
+      # failed this workflow whenever Databricks blocked new runs.
 
       - name: Write job summary
         shell: bash
@@ -328,13 +317,12 @@ jobs:
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
           echo "| Run date | $RUN_DATE |" >> $GITHUB_STEP_SUMMARY
           echo "| Lookback hours | $LOOKBACK_HOURS |" >> $GITHUB_STEP_SUMMARY
-          echo "| Databricks run ID | ${DATABRICKS_RUN_ID:-not triggered} |" >> $GITHUB_STEP_SUMMARY
           echo "| ENTSO-E load fetch | ${LOAD_STATUS:-unknown} |" >> $GITHUB_STEP_SUMMARY
           echo "| OpenMeteo weather fetch | ${TEMP_STATUS:-unknown} |" >> $GITHUB_STEP_SUMMARY
           if [ -n "$FETCH_FAILURES" ]; then
             echo "| Status | ❌ Fetch failed: $FETCH_FAILURES |" >> $GITHUB_STEP_SUMMARY
           else
-            echo "| Status | ✅ Files uploaded & Pipeline triggered |" >> $GITHUB_STEP_SUMMARY
+            echo "| Status | ✅ Files uploaded (processed by the next scheduled Databricks run) |" >> $GITHUB_STEP_SUMMARY
           fi
 
       - name: Fail on fetch errors
